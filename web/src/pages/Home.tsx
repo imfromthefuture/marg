@@ -8,7 +8,8 @@ import { Sparkline } from '../Chart';
 type Tab = 'mcap' | 'new' | 'active';
 const TABS: [Tab, string][] = [['mcap', 'Top'], ['new', 'New'], ['active', 'Most traded']];
 
-// One row in the list, from the indexer.
+// One row in the list, from the indexer. The trending row above the grid only shows once there are
+// enough tokens (8+); with fewer it would just repeat the first cards of the grid.
 type ListToken = {
     address: string; name: string; symbol: string; image?: string; creator: string; description?: string | null;
     mcap: bigint; createdAt?: number | null; change24h?: number; spark?: number[];
@@ -93,7 +94,7 @@ export function Home() {
                 <div className="kpi"><span>New 24h</span><b>{newCount.toLocaleString('en-US')}</b></div>
             </div>
 
-            {trending.length > 0 && (
+            {tokens.length >= 8 && (
                 <div className="trending">
                     {trending.map((t, i) => (
                         <Link key={t.address} to={`/token/${t.address}`} className="tcard">
