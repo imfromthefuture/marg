@@ -166,7 +166,7 @@ export function Docs() {
                     <h3>Where do I see my tokens?</h3>
                     <p>In your TON wallet. Marg never holds your tokens; every trade settles directly to your wallet.</p>
                     <h3>Where do I follow MARG?</h3>
-                    <p>On X at <a href="https://x.com/Marg_lol" target="_blank" rel="noreferrer">@Marg_lol</a> and on Telegram at <a href="https://t.me/marglolportal" target="_blank" rel="noreferrer">t.me/marglolportal</a>. New launches: <a href="https://t.me/marglollaunches" target="_blank" rel="noreferrer">t.me/marglollaunches</a>. Official links are only the ones shown on marg.lol.</p>
+                    <p>On X at <a href="https://x.com/Marg_lol" target="_blank" rel="noreferrer">@Marg_lol</a> and on Telegram at <a href="https://t.me/marglolportal" target="_blank" rel="noreferrer">t.me/marglolportal</a>. New launches: <a href="https://t.me/marglollaunches" target="_blank" rel="noreferrer">t.me/marglollaunches</a>. Source code: <a href="https://github.com/imfromthefuture/marg" target="_blank" rel="noreferrer">github.com/imfromthefuture/marg</a>. Official links are only the ones shown on marg.lol.</p>
                     <h3>How do I get buy alerts in my token's Telegram group?</h3>
                     <p>Add <a href="https://t.me/marglolbot" target="_blank" rel="noreferrer">@marglolbot</a> to your group as an admin and type <code>/track</code> followed by your token's address. Every buy is then posted in the group with the amount, market cap and a chart link. <code>/min 1</code> hides buys under 1 Gram, <code>/untrack</code> stops it.</p>
                 </section>

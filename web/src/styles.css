@@ -110,6 +110,10 @@ button { font: inherit; }
 @keyframes ticker { to { transform: translateX(-50%); } }
 
 main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 96px; }
+.footer-links { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.footer-socials { display: inline-flex; gap: 6px; margin-left: 8px; }
+.footer-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border-2); color: var(--text); }
+.footer-icon:hover { border-color: var(--accent); color: var(--accent); }
 .footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; max-width: 1280px; margin: 0 auto; padding: 20px 24px 100px; border-top: 1px solid var(--border-2); color: var(--hint); font-size: 12px; }
 
 /* ---------- surfaces ---------- */

@@ -49,6 +49,34 @@ export function Icon({ name, size = 20 }: { name: keyof typeof icons; size?: num
 export const X_URL = 'https://x.com/Marg_lol';
 export const TG_URL = 'https://t.me/marglolportal';
 export const TG_LAUNCHES_URL = 'https://t.me/marglollaunches';
+export const GITHUB_URL = 'https://github.com/imfromthefuture/marg';
+
+function TgLogo({ size = 17 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M21.94 4.3 18.8 19.1c-.24 1.05-.86 1.31-1.74.81l-4.8-3.54-2.32 2.23c-.26.26-.47.47-.97.47l.35-4.9 8.92-8.06c.39-.35-.08-.54-.6-.19L5.62 12.86l-4.75-1.49c-1.03-.32-1.05-1.03.22-1.53L19.67 2.68c.86-.32 1.61.19 1.33 1.62z" />
+        </svg>
+    );
+}
+
+function GhLogo({ size = 17 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z" />
+        </svg>
+    );
+}
+
+// X, Telegram and GitHub as icon links (header and footer).
+function Socials({ className }: { className: string }) {
+    return (
+        <>
+            <a className={className} href={X_URL} target="_blank" rel="noreferrer" title="MARG on X" aria-label="MARG on X"><XLogo /></a>
+            <a className={className} href={TG_URL} target="_blank" rel="noreferrer" title="MARG on Telegram" aria-label="MARG on Telegram"><TgLogo /></a>
+            <a className={className} href={GITHUB_URL} target="_blank" rel="noreferrer" title="MARG on GitHub" aria-label="MARG on GitHub"><GhLogo /></a>
+        </>
+    );
+}
 
 function XLogo({ size = 16 }: { size?: number }) {
     return (
@@ -129,7 +157,7 @@ function App() {
                 <Search />
                 {IS_TESTNET && <span className="net">testnet</span>}
                 {usd !== null && <span className="chip mono"><span className="dot">G</span><b>${usd.toFixed(2)}</b></span>}
-                <a className="chip icon-btn x-link" href={X_URL} target="_blank" rel="noreferrer" title="MARG on X"><XLogo /></a>
+                <Socials className="chip icon-btn x-link" />
                 <button className="chip icon-btn" onClick={toggleTheme} title="Light / dark">
                     <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
                 </button>
@@ -148,7 +176,9 @@ function App() {
                 </Routes>
             </main>
             <footer className="footer">
-                <span>© MARG · launch and trade on TON · <Link to="/docs">Docs</Link> · <a href={X_URL} target="_blank" rel="noreferrer">X @Marg_lol</a> · <a href={TG_URL} target="_blank" rel="noreferrer">Telegram</a> · <a href={TG_LAUNCHES_URL} target="_blank" rel="noreferrer">New launches</a></span>
+                <span className="footer-links">© MARG · launch and trade on TON · <Link to="/docs">Docs</Link> · <a href={TG_LAUNCHES_URL} target="_blank" rel="noreferrer">New launches</a>
+                    <span className="footer-socials"><Socials className="footer-icon" /></span>
+                </span>
                 <span>Trades settle on-chain. Nothing here is financial advice.</span>
             </footer>
             <nav className="bottom-nav">
