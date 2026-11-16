@@ -1,0 +1,34 @@
+[Unit]
+Description=Marg keeper (harvests launch taxes, runs due buybacks)
+After=network-online.target tron-indexer.service
+Wants=tron-indexer.service
+
+[Service]
+User=tron-keeper
+Group=tron-keeper
+WorkingDirectory=/opt/tron-keeper
+Environment=NETWORK=mainnet
+Environment=INDEXER_URL=http://127.0.0.1:8811/api/idx/tokens?kind=dex
+# Allowlist: only masters these factories derive are called (same list as the indexer).
+Environment=LAUNCH_FACTORY=EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb
+Environment=KEEPER_INTERVAL_SEC=600
+Environment=KEEPER_MIN_TAX=0.5
+Environment=KEEPER_MIN_BALANCE=0.3
+Environment=KEEPER_MAX_TX=10
+# KEEPER_MNEMONIC (and optionally TONCENTER_API_KEY) live here: root-owned, mode 0600, never committed.
+EnvironmentFile=/etc/tron-keeper.env
+ExecStart=/usr/bin/node /opt/tron-keeper/dist/keeper.js
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

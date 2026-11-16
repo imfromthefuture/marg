@@ -1,0 +1,10 @@
+{
+  "projects": [
+    {
+      "name": "FeeConverter",
+      "path": "./contracts/fee_converter.tact",
+      "output": "./build",
+      "options": { "debug": false, "external": false }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "marg-tgbot",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "esbuild src/tgbot.ts --bundle --platform=node --target=node20 --outfile=dist/tgbot.js",
+    "start": "node dist/tgbot.js",
+    "test": "T=$(mktemp -d) && esbuild test/bot.test.ts --bundle --platform=node --target=node20 --outfile=$T/t.js --log-level=warning && TGBOT_TEST_DIR=$T node $T/t.js; R=$?; rm -rf $T; exit $R"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2"
+  }
+}

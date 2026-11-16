@@ -1,0 +1,18 @@
+{
+  "name": "marg-indexer",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --external:better-sqlite3 --outfile=dist/indexer.js",
+    "start": "node dist/indexer.js",
+    "test": "T=$(mktemp -d) && esbuild test/loop.test.ts --bundle --platform=node --target=node20 --external:better-sqlite3 --outfile=$T/t.js --log-level=warning && NODE_PATH=$PWD/node_modules DB_PATH=$T/test.db LAUNCH_FACTORY= TONCENTER_API_KEY=test MAX_TOKEN_FAILS=2 DEX_ROUTER=0:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee DEX_PLAIN_ASSETS=EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs,EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOT INDEXER_NO_START=1 node $T/t.js; R=$?; rm -rf $T; exit $R"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "marg-keeper",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build": "esbuild src/keeper.ts --bundle --platform=node --target=node20 --outfile=dist/keeper.js && esbuild src/gen-wallet.ts --bundle --platform=node --target=node20 --outfile=dist/gen-wallet.js",
+    "start": "node dist/keeper.js",
+    "once": "KEEPER_ONCE=1 node dist/keeper.js",
+    "gen-wallet": "node dist/gen-wallet.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2"
+  }
+}

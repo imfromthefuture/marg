@@ -1,0 +1,52 @@
+[Unit]
+Description=Marg Telegram bot @marglolbot (launch feed and group buy alerts)
+After=network-online.target tron-indexer.service
+Wants=network-online.target tron-indexer.service
+# Give up after 5 failed starts in 5 minutes (e.g. a revoked token: the bot exits 1 on 401)
+# instead of restarting forever. Reset with: systemctl reset-failed tron-tgbot
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=tron-tgbot
+Group=tron-tgbot
+WorkingDirectory=/opt/tron-tgbot
+Environment=INDEXER_URL=http://127.0.0.1:8811/api/idx
+Environment=SITE_URL=https://marg.lol
+# TG_BOT_TOKEN (required), TG_LAUNCH_CHAT (e.g. -1001234567890 or @marglaunches) and optionally
+# TONCENTER_API_KEY live here: root-owned, mode 0600, never committed.
+EnvironmentFile=/etc/tron-tgbot.env
+# State (seen launches, trade cursor, update offset, tracked chats): /var/lib/tron-tgbot/state.json
+StateDirectory=tron-tgbot
+StateDirectoryMode=0700
+ExecStart=/usr/bin/node /opt/tron-tgbot/dist/tgbot.js
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Deny anything outside @system-service with EPERM instead of killing the process (SIGSYS), so a
+# probe like libuv's io_uring_setup falls back cleanly. Do not add MemoryDenyWriteExecute: V8's JIT needs W+X.
+SystemCallErrorNumber=EPERM
+UMask=0077
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

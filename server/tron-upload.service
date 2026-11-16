@@ -1,0 +1,24 @@
+[Unit]
+Description=Tron launchpad image upload
+After=network.target
+
+[Service]
+User=tron-upload
+Group=tron-upload
+Environment=PORT=8810
+Environment=UPLOAD_DIR=/var/www/tron-uploads
+Environment=PUBLIC_BASE=https://marg.lol
+Environment=UPLOAD_QUOTA_BYTES=2147483648
+Environment=UPLOAD_IP_DAILY_BYTES=52428800
+ExecStart=/usr/bin/node /opt/tron-upload/upload.mjs
+Restart=on-failure
+# Hardening: can only write to the uploads folder
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/www/tron-uploads
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+node_modules
+build
+dist
+temp
+.env
+web/node_modules
+web/dist
+.claude/settings.local.json
+*.log
+.DS_Store
+# env files of any kind (only the example is public)
+.env.*
+!.env.example
+# local databases / test state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+# private business documents (deck, grant application, social graphics)
+pitch/

@@ -1,0 +1,16 @@
+{
+  "projects": [
+    {
+      "name": "Vault",
+      "path": "./contracts/vault.tact",
+      "output": "./build",
+      "options": { "debug": false, "external": false }
+    },
+    {
+      "name": "VaultMath",
+      "path": "./contracts/mocks/vault_math_harness.tact",
+      "output": "./build",
+      "options": { "debug": false, "external": false }
+    }
+  ]
+}

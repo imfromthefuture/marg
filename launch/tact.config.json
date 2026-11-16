@@ -1,0 +1,5 @@
+{
+  "projects": [
+    { "name": "Launch", "path": "./contracts/factory.tact", "output": "./build", "options": { "debug": false, "external": false } }
+  ]
+}

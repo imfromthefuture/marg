@@ -1,0 +1,28 @@
+[Unit]
+Description=Marg indexer (curve and DEX launch trades, candles, holders)
+After=network-online.target
+
+[Service]
+User=tron-indexer
+Group=tron-indexer
+WorkingDirectory=/opt/tron-indexer
+Environment=PORT=8811
+Environment=NETWORK=mainnet
+Environment=LAUNCH_FACTORY=EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb
+Environment=DEX_ROUTER=EQDBEgfjO5B2K5hRGT9X1QNN5r7gCdB96xs0vXcS7aVdevpx
+Environment=DEX_PLAIN_CHECK_SEC=60
+Environment=DB_PATH=/var/lib/tron-indexer/marg.db
+# Optional: TONCENTER_API_KEY in this file raises the rate limit from 1 to ~10 requests/s.
+EnvironmentFile=-/etc/tron-indexer.env
+ExecStart=/usr/bin/node /opt/tron-indexer/dist/indexer.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=tron-indexer
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

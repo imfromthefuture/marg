@@ -1,0 +1,58 @@
+{
+  "projects": [
+    {
+      "name": "Router",
+      "path": "./contracts/router.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    },
+    {
+      "name": "TestJetton",
+      "path": "./contracts/mocks/test_jetton.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    },
+    {
+      "name": "Fake",
+      "path": "./contracts/mocks/fake_wallet.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    },
+    {
+      "name": "TestHook",
+      "path": "./contracts/mocks/test_hook.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    },
+    {
+      "name": "MathHarness",
+      "path": "./contracts/mocks/math_harness.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    },
+    {
+      "name": "FotJetton",
+      "path": "./contracts/mocks/fot_jetton.tact",
+      "output": "./build",
+      "options": {
+        "debug": false,
+        "external": false
+      }
+    }
+  ]
+}
