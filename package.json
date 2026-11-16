@@ -1,11 +1,10 @@
 {
-  "name": "tron-launchpad",
+  "name": "marg",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tact --config tact.config.json",
-    "test": "npm run build && jest",
-    "params": "ts-node scripts/calcParams.ts"
+    "build": "tact --config dex/v2/tact.config.json && tact --config launch/tact.config.json && tact --config vaults/tact.config.json && tact --config fees/tact.config.json",
+    "test": "npm run build && jest"
   },
   "devDependencies": {
     "@tact-lang/compiler": "^1.6.13",
@@ -22,5 +21,5 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
-  "license": "MIT"
+  "license": "BUSL-1.1"
 }

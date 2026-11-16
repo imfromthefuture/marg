@@ -18,3 +18,4 @@ web/dist
 *.sqlite
 # private business documents (deck, grant application, social graphics)
 pitch/
+_archive/
