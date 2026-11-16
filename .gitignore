@@ -19,3 +19,5 @@ web/dist
 # private business documents (deck, grant application, social graphics)
 pitch/
 _archive/
+
+.claude/
