@@ -579,8 +579,37 @@ export function createDex(ctx: DexCtx) {
         return [404, { error: 'not found' }];
     }
 
+    // DefiLlama feed (/api/idx/defillama/...): raw on-chain units, Gram as the native id.
+    //  pools               every active pool with its current reserves (TVL adapter)
+    //  volume?from=&to=    Gram side of all swaps with from <= utime < to, unix seconds (volume adapter)
+    const LLAMA_MAX_RANGE = 31 * 86400;
+    function llamaRoute(sub: string, query: URLSearchParams): [number, unknown] {
+        if (sub === 'pools') {
+            const rows = db.prepare('SELECT * FROM pools WHERE active = 1 AND reserve0 IS NOT NULL AND reserve1 IS NOT NULL').all() as any[];
+            return [200, {
+                pools: rows.map((p) => ({
+                    pool: friendly(p.address), token0: ID(p.asset0), token1: ID(p.asset1),
+                    decimals0: p.decimals0, decimals1: p.decimals1, reserve0: p.reserve0, reserve1: p.reserve1,
+                })),
+            }];
+        }
+        if (sub === 'volume') {
+            const from = intParam(query.get('from'));
+            const to = intParam(query.get('to'));
+            if (from === null || to === null) return [400, { error: 'from and to must be unix seconds' }];
+            if (from >= to) return [400, { error: 'from must be < to' }];
+            if (to - from > LLAMA_MAX_RANGE) return [400, { error: `range is limited to ${LLAMA_MAX_RANGE} seconds` }];
+            const rows = db.prepare(`SELECT e.amount0_in, e.amount0_out FROM dex_events e JOIN pools p ON p.address = e.pool
+                WHERE e.kind = 'swap' AND p.asset0 = 'native' AND e.utime >= ? AND e.utime < ?`).all(from, to) as any[];
+            let vol = 0n;
+            for (const r of rows) vol += BigInt(r.amount0_in ?? '0') + BigInt(r.amount0_out ?? '0');
+            return [200, { from, to, token: NATIVE_ID, volume: vol.toString(), swaps: rows.length }];
+        }
+        return [404, { error: 'not found' }];
+    }
+
     return {
         NATIVE_ID, plainAssets, recordSwap, recordModify, poolKind, seedLaunchPools, maintainPlain, activePlainPools,
-        beginRound, endRound, describeStep, backfillStep, route, latestBlock,
+        beginRound, endRound, describeStep, backfillStep, route, llamaRoute, latestBlock,
     };
 }

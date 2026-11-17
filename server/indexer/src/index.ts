@@ -673,6 +673,7 @@ export async function route(path: string, query: URLSearchParams): Promise<[numb
         }];
     }
     if (path.startsWith('/api/idx/dexscreener/')) return dex.route(path.slice('/api/idx/dexscreener/'.length), query);
+    if (path.startsWith('/api/idx/defillama/')) return dex.llamaRoute(path.slice('/api/idx/defillama/'.length), query);
     if (path === '/api/idx/tokens') return [200, listTokens(query.get('kind'))];
     if (path === '/api/idx/trades') {
         const limit = Math.min(Number(query.get('limit') ?? 30) || 30, 100);
