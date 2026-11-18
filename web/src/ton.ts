@@ -1,4 +1,4 @@
-import { Address, fromNano } from '@ton/core';
+import { Address, fromNano, toNano } from '@ton/core';
 import { TonClient } from '@ton/ton';
 import { LaunchJetton } from '../../launch/build/Launch_LaunchJetton';
 import { LaunchWallet } from '../../launch/build/Launch_LaunchWallet';
@@ -77,6 +77,19 @@ export async function verifiedWallet(master: Address, owner: Address): Promise<A
         throw new Error('This token\'s contract points to a wallet that is not its own. Not sending: it may be a scam token.');
     }
     return wallet;
+}
+
+// A launch-token wallet keeps only ~0.01 Gram and pays its storage rent from it. After a couple of
+// idle years that is gone, and the master's small reward ack to the wallet would be eaten by the
+// rent debt, which blocks the holder's claims for good (audit round 4, R4A-1). So before the site
+// makes such a wallet act (claim, sell), it tops up a nearly empty one in the same transaction.
+// The Gram stays in the user's own token wallet. Plain non-bounceable transfer, sent first.
+const WALLET_TOPUP = toNano('0.05');
+const WALLET_TOPUP_BELOW = toNano('0.03');
+export async function walletTopUp(wallet: Address): Promise<{ address: string; amount: string; payload?: string } | null> {
+    const st = await q(() => client.getContractState(wallet));
+    if (st.state !== 'active' || st.balance >= WALLET_TOPUP_BELOW) return null;
+    return { address: wallet.toString({ bounceable: false }), amount: WALLET_TOPUP.toString() };
 }
 
 export { buildOnchainContent, parseContent } from './content';

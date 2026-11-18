@@ -157,7 +157,7 @@ export function SwapBox({ fixed, fixedPool, initialOut, onSent }: {
         try {
             setStatus('Confirm in your wallet…');
             const m = await swapMessage({ router: DEX_ROUTER, pool, tokenIn, tokenOut, amountIn: amount, minOut, allowPartial: partial, owner: wallet, maxCrossings: mc });
-            const s = await send([m], 'Swap');
+            const s = await send(m, 'Swap');
             setStatus(s || null);
             if (s.includes(' sent')) {
                 setInput('');

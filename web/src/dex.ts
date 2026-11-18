@@ -6,7 +6,7 @@ import {
 import { loadGetterTuplePoolState, loadGetterTupleQuote, Pool } from '../../dex/v2/build/Router_Pool';
 import { Position, type PositionData } from '../../dex/v2/build/Router_Position';
 import { LaunchJetton, type LaunchInfo } from '../../launch/build/Launch_LaunchJetton';
-import { client, IS_TESTNET, openMaster, openWallet, parseContent, q, TONCENTER, verifiedWallet } from './ton';
+import { client, IS_TESTNET, openMaster, openWallet, parseContent, q, TONCENTER, verifiedWallet, walletTopUp } from './ton';
 import { launchFactory } from './launch';
 import { api } from './api';
 import { launchExtra, sqrtBand } from './dexmath';
@@ -313,7 +313,7 @@ export function quote(pool: DexPool, zeroForOne: boolean, amountIn: bigint): Pro
 
 // --- messages -----------------------------------------------------------------
 
-export type TxMessage = { address: string; amount: string; payload: string };
+export type TxMessage = { address: string; amount: string; payload?: string };
 const msg = (to: Address, amount: bigint, body: Cell): TxMessage =>
     ({ address: to.toString(), amount: amount.toString(), payload: body.toBoc().toString('base64') });
 const cell = (store: (b: Builder) => void) => beginCell().store(store).endCell();
@@ -331,7 +331,7 @@ function jettonToRouter(userWallet: Address, router: Address, owner: Address, am
 export async function swapMessage(o: {
     router: Address; pool: DexPool; tokenIn: DexToken; tokenOut: DexToken; amountIn: bigint; minOut: bigint;
     allowPartial: boolean; owner: Address; maxCrossings?: bigint;
-}): Promise<TxMessage> {
+}): Promise<TxMessage[]> {
     const mc = o.maxCrossings ?? MAX_CROSSINGS;
     const gas = swapGas(o.allowPartial, mc, o.pool);
     const router = o.pool.router ?? o.router;
@@ -342,13 +342,14 @@ export async function swapMessage(o: {
         referral: null, refBps: 0n, fwdTon: 0n, fwdPayload: null,
     };
     if (isGram(o.tokenIn.id!)) {
-        return msg(router, o.amountIn + gas, cell(storeSwapNative({
+        return [msg(router, o.amountIn + gas, cell(storeSwapNative({
             $$type: 'SwapNative', queryId: 0n, amount: o.amountIn, otherToken: o.tokenOut.id!, ...common,
-        })));
+        })))];
     }
     const wallet = await verifiedWallet(o.tokenIn.master!, o.owner);
     const payload = cell(storeSwapPayload({ $$type: 'SwapPayload', otherToken: o.tokenOut.id!, ...common }));
-    return jettonToRouter(wallet, router, o.owner, o.amountIn, gas, payload);
+    const top = o.tokenIn.launch ? await walletTopUp(wallet) : null;
+    return [...(top ? [top] : []), jettonToRouter(wallet, router, o.owner, o.amountIn, gas, payload)];
 }
 
 // Mint a position. Gram pools: Gram only = MintNative; with a jetton leg = one jetton transfer whose

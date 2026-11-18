@@ -63,7 +63,13 @@ The contracts are not upgradeable: nobody, including the admin, can change their
 - **Launch factory:** launch tiers, the treasury (new launches only), and the launch fee (can only go down).
 - **Fee converter:** the keeper, approved sell routes and the treasury wallet.
 
-No admin power reaches LP reserves, positions, locked launch liquidity or pending taxes. Admin roles move only by a two-step handover (nominate, then claim from the new wallet).
+No admin power reaches LP reserves, positions, locked launch liquidity or pending taxes.
+
+Storage rent (operations): every contract pays rent from its own balance. Keep the Router well above its
+0.05 Gram minimum (it holds ~1 Gram, about 20 years of rent) and do not sweep it down with
+`WithdrawRouterExcess`. A launch token whose trading has stopped for about two years starts paying rent
+from held funds; a plain transfer of 0.2 Gram to its master restores the reserve (the rest goes to the
+creator). The app tops up a holder's nearly empty token wallet (0.05 Gram) before a claim or a sell. Admin roles move only by a two-step handover (nominate, then claim from the new wallet).
 
 The creator tax and the platform fee are charged on swaps in a token's launch pool. The app trades launch tokens only through that pool and does not open other pools or new positions for them.
 

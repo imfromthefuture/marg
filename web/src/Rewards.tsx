@@ -3,10 +3,10 @@ import { Address, beginCell, toNano } from '@ton/core';
 import { useTonAddress, useTonConnectUI } from '@tonconnect/ui-react';
 import { LaunchJetton, storeHarvest, type BuybackStatus, type RewardsData } from '../../launch/build/Launch_LaunchJetton';
 import { LaunchWallet, storeClaimRewards } from '../../launch/build/Launch_LaunchWallet';
-import { client, fmtTokens, fmtTon, q } from './ton';
+import { client, fmtTokens, fmtTon, q, walletTopUp } from './ton';
 import type { LaunchInfo } from './dex';
 
-// CLAIM_VALUE is 0.04 (launch/README.md); the unused part comes back with the rewards.
+// Covers get_reward_values().claim (gas-priced, ~0.01 Gram today); the unused part comes back with the rewards.
 const CLAIM_ATTACH = toNano('0.06');
 
 // Holder rewards and buyback & burn of a taxed launch token (both live in the token master).
@@ -49,9 +49,13 @@ export function RewardsCard({ master, info, symbol, poolTax }: { master: Address
         try {
             setStatus('Confirm in your wallet…');
             const body = beginCell().store(storeClaimRewards({ $$type: 'ClaimRewards', queryId: 0n })).endCell();
+            const top = await walletTopUp(mine.wallet);    // a nearly empty wallet first gets 0.05 Gram (see ton.ts)
             await tonConnect.sendTransaction({
                 validUntil: Math.floor(Date.now() / 1000) + 300,
-                messages: [{ address: mine.wallet.toString(), amount: CLAIM_ATTACH.toString(), payload: body.toBoc().toString('base64') }],
+                messages: [
+                    ...(top ? [top] : []),
+                    { address: mine.wallet.toString(), amount: CLAIM_ATTACH.toString(), payload: body.toBoc().toString('base64') },
+                ],
             });
             setStatus('Claim sent. The Gram arrives in your wallet in a few seconds.');
             setTimeout(load, 15_000);
