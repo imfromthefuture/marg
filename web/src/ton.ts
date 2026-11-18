@@ -59,7 +59,24 @@ export async function jettonBalance(master: Address, owner: Address): Promise<{ 
     const state = await q(() => client.getContractState(wallet));
     if (state.state !== 'active') return { wallet, balance: 0n };
     const data = await q(() => openWallet(wallet).getGetWalletData());
+    // The master names the wallet itself: a fake master can name the user's wallet of another token.
+    if (!data.master.equals(master) || !data.owner.equals(owner)) return { wallet, balance: 0n };
     return { wallet, balance: data.balance };
+}
+
+// The user's jetton wallet for `master`, only if that wallet itself confirms the master and owner.
+// Every jetton transfer the app builds goes to this address. A master answers get_wallet_address
+// itself, so a fake token could otherwise name the user's wallet of a real token (USDT, ...) and the
+// transfer would spend that token instead. A wallet that is not deployed holds nothing to send.
+export async function verifiedWallet(master: Address, owner: Address): Promise<Address> {
+    const wallet = await q(() => openMaster(master).getGetWalletAddress(owner));
+    const state = await q(() => client.getContractState(wallet));
+    if (state.state !== 'active') throw new Error('You have no balance of this token.');
+    const data = await q(() => openWallet(wallet).getGetWalletData());
+    if (!data.master.equals(master) || !data.owner.equals(owner)) {
+        throw new Error('This token\'s contract points to a wallet that is not its own. Not sending: it may be a scam token.');
+    }
+    return wallet;
 }
 
 export { buildOnchainContent, parseContent } from './content';

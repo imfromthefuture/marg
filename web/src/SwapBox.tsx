@@ -4,7 +4,7 @@ import { useTonAddress, useTonConnectUI } from '@tonconnect/ui-react';
 import {
     CLOSED_LABEL, codeText, DEX_LIVE, DEX_ROUTER, DexPool, DexToken, feeParts, findPools, GAS, GRAM_TOKEN, isGram, pct,
     crossingsFor, platformBpsOf, presetOf, quote, Quote, resolveToken, STOPS, swapGas, swapMessage, taxOf, tokenKey, tokenList, TokenListItem,
-    recentLaunches, TxMessage,
+    recentLaunches, trustedJetton, TxMessage,
 } from './dex';
 import { estimateOut, minOutFor, priceImpact } from './dexmath';
 import { client, fmtTokens, fmtTon, jettonBalance, parseAmount, q, short, unitsToString } from './ton';
@@ -294,6 +294,12 @@ export function SwapBox({ fixed, fixedPool, initialOut, onSent }: {
                     ({STOPS[Number(q1!.stop)] ?? 'limit'}). The rest comes back to you; swap it again after this one settles.
                 </p>
             )}
+            {[tokenIn, tokenOut].filter((t): t is DexToken => !!t && !trustedJetton(t)).map((t) => (
+                <p key={t.master!.toRawString()} className="swap-warn">
+                    Unverified token: {t.symbol} ({short(t.master!.toString())}) is not a MARG launch or one of the main tokens.
+                    Its name, ticker and logo are set by whoever created it. Check the address before you swap.
+                </p>
+            ))}
             <button className={`button wide big ${btnClass}`} disabled={disabled} onClick={submit}>{label}</button>
             {status && <div className="status">{status}</div>}
             <p className="swap-note">

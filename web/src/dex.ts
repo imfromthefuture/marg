@@ -6,7 +6,7 @@ import {
 import { loadGetterTuplePoolState, loadGetterTupleQuote, Pool } from '../../dex/v2/build/Router_Pool';
 import { Position, type PositionData } from '../../dex/v2/build/Router_Position';
 import { LaunchJetton, type LaunchInfo } from '../../launch/build/Launch_LaunchJetton';
-import { client, IS_TESTNET, openMaster, openWallet, parseContent, q, TONCENTER } from './ton';
+import { client, IS_TESTNET, openMaster, openWallet, parseContent, q, TONCENTER, verifiedWallet } from './ton';
 import { launchFactory } from './launch';
 import { api } from './api';
 import { launchExtra, sqrtBand } from './dexmath';
@@ -45,7 +45,12 @@ export const GAS = {
     WALLET: toNano('0.15'),         // the user's jetton wallet hop; +0.05 for a holder-rewards checkpoint (launch/README.md)
     MARGIN: toNano('0.05'),         // 2 forward fees and some slack
 };
-export const MAX_CROSSINGS = 24n;   // MAX_CROSSINGS_CAP
+// The contracts allow 24 (MAX_CROSSINGS_CAP), but a swap is one Pool transaction and TON caps it at
+// 1M gas: on an adversarial tick layout 24 crossings plus fee checkpoints can exceed that, the Pool
+// aborts, and because the Router -> Pool hop does not bounce the input would be left in the Pool.
+// The app asks for at most 12 (measured worst case about 470k gas); a bigger swap partly fills or
+// is refunded instead.
+export const MAX_CROSSINGS = 12n;
 // Crossings to allow for a quoted swap: what the quote crossed plus 4 spare (the price may move a
 // little before execution), capped. The Router charges CROSS gas per allowed crossing, so this keeps
 // the attached Gram low; a swap that would need more stops and is refunded (or partly fills).
@@ -161,7 +166,15 @@ export function resolveToken(master: Address): Promise<DexToken> {
             if ('incomplete' in meta && meta.incomplete) throw new Error('Could not load this token\'s details (decimals). Try again in a moment.');
             let id: Address | null = null;
             if (launch) id = await q(() => openLaunch(master).getGetRouterWallet());
-            else if (DEX_ROUTER) id = await q(() => openMaster(master).getGetWalletAddress(DEX_ROUTER!));
+            else if (DEX_ROUTER) {
+                id = await q(() => openMaster(master).getGetWalletAddress(DEX_ROUTER!));
+                // A deployed id must be this master's wallet of the Router (not, say, the Router's USDT
+                // wallet named by a fake master).
+                if ((await q(() => client.getContractState(id!))).state === 'active') {
+                    const w = await q(() => openWallet(id!).getGetWalletData());
+                    if (!w.master.equals(master) || !w.owner.equals(DEX_ROUTER)) throw new Error('This token\'s contract does not check out (wallet mismatch).');
+                }
+            }
             return { id, master, symbol: meta.symbol, name: meta.name, image: meta.image, decimals: meta.decimals ?? 9, launch };
         })();
         p.catch(() => tokenCache.delete(k));
@@ -176,7 +189,12 @@ export function tokenById(id: Address): Promise<DexToken> {
     if (isGram(id)) return Promise.resolve(GRAM_TOKEN);
     const k = id.toRawString();
     if (!idCache.has(k)) {
-        const p = q(() => openWallet(id).getGetWalletData()).then((w) => resolveToken(w.master)).then((t) => ({ ...t, id }));
+        // The id's own wallet names its master; the master must name the same id back, else a fake
+        // wallet claiming master = USDT would be shown (and traded) as USDT.
+        const p = q(() => openWallet(id).getGetWalletData()).then((w) => resolveToken(w.master)).then((t) => {
+            if (!t.id || !t.id.equals(id)) throw new Error('Unverified pool token');
+            return { ...t, id };
+        });
         p.catch(() => idCache.delete(k));
         idCache.set(k, p);
     }
@@ -328,7 +346,7 @@ export async function swapMessage(o: {
             $$type: 'SwapNative', queryId: 0n, amount: o.amountIn, otherToken: o.tokenOut.id!, ...common,
         })));
     }
-    const wallet = await q(() => openMaster(o.tokenIn.master!).getGetWalletAddress(o.owner));
+    const wallet = await verifiedWallet(o.tokenIn.master!, o.owner);
     const payload = cell(storeSwapPayload({ $$type: 'SwapPayload', otherToken: o.tokenOut.id!, ...common }));
     return jettonToRouter(wallet, router, o.owner, o.amountIn, gas, payload);
 }
@@ -356,7 +374,7 @@ export async function mintMessages(o: {
     };
     const t0 = pool.token0;
     const t1 = pool.token1;
-    const walletOf = (t: DexToken) => q(() => openMaster(t.master!).getGetWalletAddress(owner));
+    const walletOf = (t: DexToken) => verifiedWallet(t.master!, owner);
     const payload = (otherToken: Address, gramAmount: bigint, viaAccount: boolean) =>
         cell(storeMintPayload({ $$type: 'MintPayload', otherToken, gramAmount, viaAccount, ...base }));
 

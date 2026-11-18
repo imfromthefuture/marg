@@ -658,6 +658,12 @@ async function holders(t: any) {
     return p;
 }
 
+// A positive integer up to `cap` (SQLite treats a negative LIMIT as no limit at all).
+const limitParam = (v: string | null, def: number, cap: number) => {
+    const n = Math.trunc(Number(v ?? def));
+    return Number.isFinite(n) && n >= 1 ? Math.min(n, cap) : def;
+};
+
 const TIMEFRAMES = new Set([60, 300, 900, 3600, 21600, 86400]);
 
 export async function route(path: string, query: URLSearchParams): Promise<[number, unknown]> {
@@ -676,7 +682,7 @@ export async function route(path: string, query: URLSearchParams): Promise<[numb
     if (path.startsWith('/api/idx/defillama/')) return dex.llamaRoute(path.slice('/api/idx/defillama/'.length), query);
     if (path === '/api/idx/tokens') return [200, listTokens(query.get('kind'))];
     if (path === '/api/idx/trades') {
-        const limit = Math.min(Number(query.get('limit') ?? 30) || 30, 100);
+        const limit = limitParam(query.get('limit'), 30, 100);
         const rows = (db.prepare(`SELECT trades.*, tokens.symbol, tokens.image FROM trades JOIN tokens ON tokens.address = trades.token
             WHERE tokens.kind = 'dex' ORDER BY utime DESC, lt DESC LIMIT ?`).all(limit + HIDDEN.size * 50) as any[]).filter((r) => !HIDDEN.has(r.token));
         return [200, rows.slice(0, limit).map(tradeView)];
@@ -694,7 +700,7 @@ export async function route(path: string, query: URLSearchParams): Promise<[numb
             return [200, { ...tokenView(t, { vol: s.vol ?? 0, n: s.n }, priceAt(t, since)), tradesTotal: all.n, volumeTotal: Math.round(all.vol ?? 0).toString() }];
         }
         if (m[2] === 'trades') {
-            const limit = Math.min(Number(query.get('limit') ?? 50) || 50, 200);
+            const limit = limitParam(query.get('limit'), 50, 200);
             const rows = db.prepare('SELECT * FROM trades WHERE token = ? ORDER BY utime DESC, lt DESC LIMIT ?').all(t.address, limit);
             return [200, rows.map(tradeView)];
         }
