@@ -438,7 +438,7 @@ describe('v2 gas: per crossed tick and worst case', () => {
         expect(g * PRICE).toBeLessThan(SWAP_BASE_GAS + CROSS_GAS);
     });
 
-    it('worst case: 24 crossings + 24 checkpoints on a ~300-tick map stays below 1M gas', async () => {
+    it('20 crossings + 20 checkpoints (the most under the gas stop) on a ~300-tick map stays below 1M gas', async () => {
         const d = await Dex.create();
         const pool = await d.poolOf(GRAM, d.tokA, 60n, null);
         // Seed [-960, 960], then ranges [i*960, (i+1)*960] below: a crossing every 16 spacings with
@@ -459,18 +459,18 @@ describe('v2 gas: per crossed tick and worst case', () => {
         expect(tc).toBeGreaterThanOrEqual(300n);
         await patchMaxVolAcc(d.chain, pool.address, 4_000_000_000n);
         const amount = toNano('100000');
-        const q = await pool.getGetQuote(true, amount, 0n, 24n, 0n, true);
-        expect(q.crossings).toBe(24n);
-        expect(q.steps).toBe(48n);
-        const need = SWAP_BASE_GAS + 24n * CROSS_GAS + toNano('0.07');
-        res = await d.swapNative(d.bob, amount, d.tokA, { maxCrossings: 24n, allowPartial: true, gas: need + toNano('0.03') });
+        const q = await pool.getGetQuote(true, amount, 0n, 20n, 0n, true);
+        expect(q.crossings).toBe(20n);
+        expect(q.steps).toBe(40n);
+        const need = SWAP_BASE_GAS + 20n * CROSS_GAS + toNano('0.07');
+        res = await d.swapNative(d.bob, amount, d.tokA, { maxCrossings: 20n, allowPartial: true, gas: need + toNano('0.03') });
         expectNoFailures(res);
         expect(swapEvents(res)[0].amountOut).toBe(q.amountOut);
         const g = gasAt(res, pool.address, 0x4d480021)[0];
         // eslint-disable-next-line no-console
         console.log(`worst case (24 crossings + 24 checkpoints, ${tc} ticks): gas ${g}`);
         expect(g).toBeLessThan(1_000_000n);
-        expect(g * PRICE).toBeLessThan(SWAP_BASE_GAS + 24n * CROSS_GAS);
+        expect(g * PRICE).toBeLessThan(SWAP_BASE_GAS + 20n * CROSS_GAS);
     });
 });
 

@@ -413,24 +413,24 @@ describe('swap: gas at exactly the Router minimum (worst case: 24 crossings + ch
         base = d.chain.snapshot();
     });
 
-    it('native entry: min - 1 is refused by the Router; exactly min runs the worst case to completion', async () => {
+    it('native entry: min - 1 is refused by the Router; exactly min runs 20 crossings (the most that fit under the gas stop) to completion', async () => {
         const amount = toNano('100000');
-        const o = { maxCrossings: 24n, allowPartial: true, referral: ref.address, refBps: 10n, ext };
-        const q = await pool.getGetQuote(true, amount, 0n, 24n, 10n, true);
-        expect(q.crossings).toBe(24n);
-        expect(q.steps).toBe(48n);
+        const o = { maxCrossings: 20n, allowPartial: true, referral: ref.address, refBps: 10n, ext };
+        const q = await pool.getGetQuote(true, amount, 0n, 20n, 10n, true);
+        expect(q.crossings).toBe(20n);
+        expect(q.steps).toBe(40n);
         const min = await findMin(d.chain, toNano('0.3'), toNano('1'), async (g) => {
             const r = await d.swapNative(d.bob, amount, d.tokA, { ...o, gas: g });
             return failedAt(r, d.router.address).length === 0;
         });
-        // swapGas = 0.35 + 24 * 0.006 + 0.07 (partial) + 0.07 (referral) + 0.01 (hook) + 2 fwd fees
-        expect(min).toBeGreaterThan(toNano('0.644'));
-        expect(min).toBeLessThan(toNano('0.66'));
+        // swapGas = 0.35 + 20 * 0.006 + 0.07 (partial) + 0.07 (referral) + 0.01 (hook) + 2 fwd fees
+        expect(min).toBeGreaterThan(toNano('0.62'));
+        expect(min).toBeLessThan(toNano('0.636'));
         let res = await d.swapNative(d.bob, amount, d.tokA, { ...o, gas: min - 1n });
         expect(failedAt(res, d.router.address).length).toBe(1);
         expect(swapEvents(res)).toEqual([]);
         const sim = await simOf(pool, extM);
-        const e = sim.swap(true, amount, 0n, 24, 10n, true, 0n, BigInt(d.now));
+        const e = sim.swap(true, amount, 0n, 20, 10n, true, 0n, BigInt(d.now));
         res = await d.swapNative(d.bob, amount, d.tokA, { ...o, gas: min });
         expectNoFailures(res);
         expect(swapEvents(res)[0].amountOut).toBe(e.out);
@@ -443,9 +443,9 @@ describe('swap: gas at exactly the Router minimum (worst case: 24 crossings + ch
         await expectPoolEquals(pool, sim);
     });
 
-    it('jetton entry: min - 1 → LOW_GAS refund of the jettons; exactly min runs the worst case', async () => {
+    it('jetton entry: min - 1 → LOW_GAS refund of the jettons; exactly min runs 20 crossings (the most that fit under the gas stop)', async () => {
         const amount = toNano('100000');
-        const o = { maxCrossings: 24n, allowPartial: true, referral: ref.address, refBps: 10n, ext };
+        const o = { maxCrossings: 20n, allowPartial: true, referral: ref.address, refBps: 10n, ext };
         const min = await findMin(d.chain, toNano('0.3'), toNano('1'), async (g) => {
             const r = await d.swapJetton(d.jA, d.bob, amount, GRAM, { ...o, gas: g });
             return !refundCodes(r).includes(CODES.LOW_GAS);
@@ -456,8 +456,8 @@ describe('swap: gas at exactly the Router minimum (worst case: 24 crossings + ch
         expect(refundCodes(res)).toEqual([CODES.LOW_GAS]);
         expect(await d.jBal(d.jA, d.bob.address)).toBe(jb);
         const sim = await simOf(pool, extM);
-        const e = sim.swap(false, amount, 0n, 24, 10n, true, 0n, BigInt(d.now));
-        expect(e.crossings).toBe(24);
+        const e = sim.swap(false, amount, 0n, 20, 10n, true, 0n, BigInt(d.now));
+        expect(e.crossings).toBe(20);
         res = await d.swapJetton(d.jA, d.bob, amount, GRAM, { ...o, gas: min });
         expectNoFailures(res);
         expect(swapEvents(res)[0].amountOut).toBe(e.out);

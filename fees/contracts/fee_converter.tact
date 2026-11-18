@@ -20,7 +20,9 @@ import "./messages";
 //  - JettonTransfer to `jettonWallet` (ConvertJetton: destination = the fixed Router; RescueJetton:
 //    destination = treasury), paid ONLY from the caller's attached value (reserveOwn);
 //  - PositionDecrease{liquidityDelta 0, recipient = this} to `position` (CollectPosition), paid only
-//    from the caller's attached value (reserveOwn).
+//    from the caller's attached value (reserveOwn);
+//  - ClaimRewards to `jettonWallet` (ClaimJettonRewards, keeper / admin), paid only from the caller's
+//    attached value (reserveOwn): holder rewards of launch tokens come back as Gram.
 // There is no arbitrary withdraw, no NftTransfer (owned positions can never leave) and no way to
 // change the Router. The admin can change the keeper and the treasury, and hand over the admin role
 // in two steps.
@@ -34,12 +36,19 @@ const DEX_SWAP_BASE_GAS: Int = ton("0.35");
 const DEX_CROSS_GAS: Int = ton("0.006");
 const DEX_DECREASE_GAS: Int = ton("0.25");
 const DEX_MAX_CROSSINGS: Int = 24;
-// Router forward fees + a possible AFTER_SWAP hook notification (0.01) + slack.
-const FC_SWAP_MARGIN: Int = ton("0.06");
+// What the Router's swapGas (dex/v2 router.tact, get_swap_gas) can add on top of base + crossings for a
+// jetton -> Gram sell: an AFTER_SWAP hook notification (HOOK_NOTIFY_VALUE 0.01), the platform-fee payout
+// of a launch key (PAYOUT_MSG_GAS 0.01) and the tax auto-payout of a taxed key (PAYOUT_MSG_GAS 0.01 +
+// TAX_PAYOUT_GAS 0.04) = 0.07, plus the 2 forward fees the Router adds (FC_FWD_SLACK covers ~15x today's).
+// v3 (audit M-3): the old 0.06 was always 2 forward fees short on a taxed launch key (Router LOW_GAS).
+const DEX_SWAP_EXTRAS: Int = ton("0.07");
+const FC_FWD_SLACK: Int = ton("0.03");
+const FC_SWAP_MARGIN: Int = ton("0.1");         // = DEX_SWAP_EXTRAS + FC_FWD_SLACK
 // Converter compute + converter -> wallet -> Router-wallet hops (the excess comes back here).
 const FC_WALLET_GAS: Int = ton("0.12");
 const FC_COLLECT_VALUE: Int = ton("0.3");       // DECREASE_GAS + our compute and forward fee + slack
 const FC_RESCUE_VALUE: Int = ton("0.1");
+const FC_REWARDS_VALUE: Int = ton("0.1");       // ClaimJettonRewards: our compute + the wallet's ClaimRewards minimum (~0.042), rest comes back
 const FC_SWAP_TTL: Int = 600;                   // swap / decrease deadline, seconds from now
 
 contract FeeConverter {
@@ -105,6 +114,10 @@ contract FeeConverter {
         let ctx = context();
         require(ctx.sender == self.admin || (self.keeper != null && ctx.sender == self.keeper!!), "Not keeper");
         require(msg.amount > 0, "Invalid amount");
+        // Audit L-7: the slippage bound is the caller's. On-chain the converter has no price to check it
+        // against (a TWAP read is asynchronous and the Router takes minOut in the same message), so the
+        // only hard rules are: minOut is mandatory, only the keeper / admin may convert, and only on an
+        // admin-approved key. The keeper MUST derive minOut from a quote / the pool TWAP (server/keeper).
         require(msg.minOut > 0, "minOut must be > 0");
         require(msg.maxCrossings >= 1 && msg.maxCrossings <= DEX_MAX_CROSSINGS, "Invalid crossings");
         require(isBasechain(msg.jettonWallet) && msg.jettonWallet != myAddress() && msg.jettonWallet != self.router,
@@ -112,6 +125,10 @@ contract FeeConverter {
         require(self.convertKeys.exists(convertKeyId(msg.jettonWallet, msg.tickSpacing, msg.ext)), "Key not approved");
         let fwd = self.swapForward(msg.maxCrossings);
         require(ctx.value >= fwd + FC_WALLET_GAS, "Insufficient TON attached");
+        // Anything attached above the minimum is split between the Router leg and the wallet hops, so a
+        // caller can always out-pay either side (higher forward fees, a reward token's checkpoint).
+        // Whatever is unused comes back here and is forwarded to the treasury.
+        fwd += (ctx.value - fwd - FC_WALLET_GAS) / 2;
 
         let payload = SwapPayload {
             otherToken: GRAM,
@@ -174,6 +191,27 @@ contract FeeConverter {
                 deadline: now() + FC_SWAP_TTL,
                 recipient: myAddress(),
             }.toCell(),
+        });
+    }
+
+    // Holder rewards of a Marg launch token (launch/contracts/jetton.tact): the converter's wallet of a
+    // rewards token is a tracked holder like any other, and only the wallet's owner can claim. Keeper or
+    // admin: send ClaimRewards to the converter's wallet; the master pays the rewards here as plain Gram
+    // (a comment message), which is forwarded to the treasury like every other Gram. Paid only from the
+    // caller's attached value; the body is fixed, so nothing else can be triggered with it.
+    receive(msg: ClaimJettonRewards) {
+        let ctx = context();
+        require(ctx.sender == self.admin || (self.keeper != null && ctx.sender == self.keeper!!), "Not keeper");
+        require(ctx.value >= FC_REWARDS_VALUE, "Insufficient TON attached");
+        require(isBasechain(msg.jettonWallet) && msg.jettonWallet != myAddress() && msg.jettonWallet != self.router &&
+            msg.jettonWallet != self.treasury, "Invalid wallet");
+        self.reserveOwn();
+        message(MessageParameters {
+            to: msg.jettonWallet,
+            value: 0,
+            mode: SendRemainingBalance,
+            bounce: true,
+            body: LaunchClaimRewards { queryId: msg.queryId }.toCell(),
         });
     }
 
@@ -324,6 +362,10 @@ contract FeeConverter {
 
     get fun get_collect_value(): Int {
         return FC_COLLECT_VALUE;
+    }
+
+    get fun get_rewards_value(): Int {
+        return FC_REWARDS_VALUE;
     }
 }
 

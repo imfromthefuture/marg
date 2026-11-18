@@ -90,6 +90,7 @@ contract Pool {
 
     receive(msg: PoolSwap) {
         require(sender() == self.router, "Not router");
+        let k0 = self.k0();
         let ext = extOf(self.key.ext);
         let refBps = msg.referral == null ? 0 : msg.refBps;
         let platBps = 0;
@@ -113,7 +114,7 @@ contract Pool {
         let res = sim.res;
         let pays = self.takePayouts(ext);
 
-        self.reserveKeep();
+        self.settle(k0);
         if (sim.refFee > 0) {
             self.sendToken(msg.zeroForOne, sim.refFee, msg.referral!!, msg.referral!!,
                 REASON_REFERRAL, msg.queryId, 0, null, false);
@@ -215,7 +216,7 @@ contract Pool {
             code = CODE_PRICE_OUT_OF_RANGE;
         }
         if (code != 0) {
-            self.refundDeposit(msg.queryId, msg.fromUser, msg.amount0, msg.amount1, msg.refundTo, code);
+            self.refundDeposit(msg.queryId, msg.fromUser, msg.amount0, msg.amount1, msg.refundTo, code, REASON_MINT_REFUND);
             return;
         }
         let s = self.key.tickSpacing;
@@ -241,6 +242,7 @@ contract Pool {
     receive(msg: PoolLaunch) {
         let ctx = context();
         require(ctx.sender == self.router, "Not router");
+        let k0 = self.k0();
         let ext = extOf(self.key.ext);
         let s = self.key.tickSpacing;
         let t = now();
@@ -287,7 +289,7 @@ contract Pool {
         }
         if (code == 0) {
             let need = MINT_POOL_GAS + m.newTicks * (TICK_RENT_BUFFER + TICK_INIT_FEE) + POSITION_DEPLOY_VALUE +
-                (msg.devBuy > 0 ? DEV_BUY_POOL_GAS + JETTON_PAYOUT_VALUE + self.payoutGas(ext) : 0);
+                (msg.devBuy > 0 ? DEV_BUY_POOL_GAS + JETTON_PAYOUT_VALUE + PAYOUT_MSG_GAS + self.payoutGas(ext) : 0);
             if (ctx.value - msg.devBuy < need) {
                 code = CODE_LOW_GAS;
             } else if (m.use0 != 0) {
@@ -297,7 +299,10 @@ contract Pool {
             }
         }
         if (code != 0) {
-            self.refundDeposit(msg.queryId, msg.fromUser, msg.devBuy, msg.amount1, msg.refundTo, code);
+            // Only a refusal of the initializer's own launch is tagged as a launch refund (V3-M1).
+            let own = ext.initializer != null && ext.initializer!! == msg.fromUser;
+            self.refundDeposit(msg.queryId, msg.fromUser, msg.devBuy, msg.amount1, msg.refundTo, code,
+                own ? REASON_LAUNCH_REFUND : REASON_MINT_REFUND);
             return;
         }
 
@@ -349,7 +354,7 @@ contract Pool {
         }.toCell());
 
         let pays = self.takePayouts(ext);
-        self.reserveKeep();
+        self.settle(k0);
         deploy(DeployParameters {
             init: initOf Position(myAddress(), index),
             value: POSITION_DEPLOY_VALUE,
@@ -368,12 +373,23 @@ contract Pool {
         });
         self.sendPayouts(pays, ext, msg.platformTo, msg.queryId);
         if (devOut > 0) {
+            // The launch outcome, reported straight from this transaction (V5-1): a message from a later
+            // pool transaction can never overtake it, whatever the shard layout.
+            message(MessageParameters {
+                to: msg.refundTo,
+                value: PAYOUT_MSG_GAS,
+                mode: SendPayGasSeparately | SendIgnoreErrors,
+                bounce: false,
+                body: GramPayout { queryId: msg.queryId, reason: REASON_LAUNCH_DONE, amount: 0, payload: null }.toCell(),
+            });
             // The jetton payout carries the remaining value; its excess returns to refundTo.
             self.sendToken(false, devOut, msg.devReceiver, msg.refundTo, REASON_SWAP_OUT, msg.queryId, 0, null, true);
         } else if (msg.devBuy > 0) {
-            self.sendToken(true, msg.devBuy, msg.refundTo, msg.refundTo, REASON_SWAP_REFUND, msg.queryId, 0, null, true);
+            self.sendToken(true, msg.devBuy, msg.refundTo, msg.refundTo, REASON_LAUNCH_DEVBUY_REFUND, msg.queryId, 0, null, true);
         } else {
-            self.excess(msg.refundTo, msg.queryId);
+            // A tagged payout, not a plain excess (anyone can make the pool send JettonExcesses to an
+            // address of their choice), so the launch master can trust it as the outcome (V3-M1).
+            self.sendToken(true, 0, msg.refundTo, msg.refundTo, REASON_LAUNCH_DONE, msg.queryId, 0, null, true);
         }
     }
 
@@ -430,7 +446,10 @@ contract Pool {
         // collected from the incoming value in the credit phase) is taken before compute. The
         // success path must still be able to pay every send, or its action phase would fail with
         // no bounce and leave the Position busy forever (review finding 1).
-        let spare = myBalance() - self.keep();
+        // v3 (audit R2-M2): storage rent is paid from the pool's rent fund (tick buffers and
+        // endowment), never from this caller; only a shortfall of the Gram owed to LPs counts.
+        let k0 = self.k0();
+        let spare = ctx.value - max(0, self.owed() + POOL_MIN_STORAGE - (myBalance() - ctx.value));
 
         let code = 0;
         let b = BurnRes {
@@ -441,7 +460,7 @@ contract Pool {
             code = CODE_LOW_GAS;
         } else if (now() > msg.deadline) {
             code = CODE_DEADLINE;
-        } else if (!isBasechain(msg.recipient) || msg.recipient == self.router) {
+        } else if (!isBasechain(msg.recipient) || msg.recipient == self.router || msg.recipient == myAddress()) {
             // A payout to the Router would be stranded there (Gram sweepable by the admin via
             // WithdrawRouterExcess, jettons unattributed in its wallet); a non-std address would
             // fail the action phase. Refuse, like every Router entry.
@@ -473,7 +492,9 @@ contract Pool {
             emit(RefundEvent { queryId: msg.queryId, user: msg.owner, code }.toCell());
             // §2.2 rule: never take the incoming value to cover a rent deficit on this path, so the
             // single reply can always be paid (the pool's own buffer absorbs the shortfall).
-            nativeReserve(max(0, min(self.keep(), myBalance() - ctx.value)), ReserveAtMost);
+            // v3 (audit V3-M2): keep the whole balance from before this message, so a refused burn never
+            // pays out Gram above keep() (that is for SweepPoolSurplus).
+            nativeReserve(max(0, myBalance() - ctx.value), ReserveAtMost);
             message(MessageParameters {
                 to: ctx.sender,
                 value: 0,
@@ -513,7 +534,7 @@ contract Pool {
 
         // spare >= need, so after reserving keep() the sends below are always funded. The Sync goes
         // first; every send also bounces the PoolBurn if it ever fails (+16), which clears `busy`.
-        self.reserveKeep();
+        self.settle(k0);
         message(MessageParameters {
             to: ctx.sender,
             value: POSITION_SYNC_VALUE,
@@ -580,6 +601,27 @@ contract Pool {
         self.payTwo(msg.queryId, f, 0, msg.treasury, msg.excessTo, REASON_PLATFORM, 0);
     }
 
+    // v3: anyone (via the Router) sends the surplus above keep() to the treasury. The surplus is
+    // Gram no handler accounts for (settle() never pays it to a caller): input stranded by a
+    // transaction that failed, or a plain donation made before v3 accounting. The treasury can
+    // then return stranded Gram to its owner.
+    receive(msg: PoolSweepSurplus) {
+        require(sender() == self.router, "Not router");
+        let surplus = max(0, myBalance() - context().value - self.keep());
+        // The surplus leaves: the baseline drops by it, so settle() releases it to the sends.
+        self.settle(self.k0() + surplus);
+        if (surplus > 0) {
+            message(MessageParameters {
+                to: msg.treasury,
+                value: surplus,
+                mode: SendPayGasSeparately | SendIgnoreErrors,
+                bounce: false,
+                body: GramPayout { queryId: msg.queryId, reason: REASON_SURPLUS, amount: surplus, payload: null }.toCell(),
+            });
+        }
+        self.excess(msg.excessTo, msg.queryId);
+    }
+
     // FEE_CONTROL: the hook sets the base fee within the key's visible bounds (next swap on).
     receive(msg: HookSetFee) {
         let ext = extOf(self.key.ext);
@@ -621,6 +663,7 @@ contract Pool {
     fun doMint(queryId: Int, user: Address, a0: Int, a1: Int, p: MintParams, allowInit: Bool,
                preset: FeePreset, graduation: Bool, notify: Bool) {
         let ctx = context();
+        let k0 = self.k0();
         let ext = extOf(self.key.ext);
         let t = now();
         let code = 0;
@@ -631,13 +674,16 @@ contract Pool {
         let initNow = false;
         if (t > p.deadline) {
             code = CODE_DEADLINE;
+        } else if (!graduation && ext.initializer != null && ext.initializer!! != user) {
+            // v3 (audit M-1, R2-M1): on a launch key only its initializer (the launch master) may
+            // add liquidity. Anyone else's position would be a range order that trades around the
+            // creator tax and the platform fee, or captures the anti-snipe launch fee.
+            code = CODE_NOT_INITIALIZER;
         } else if (!self.initialized) {
             if (p.sqrtPriceInitX96 == 0) {
                 code = CODE_NOT_INITIALIZED;
             } else if (!allowInit) {
                 code = CODE_CREATION_PAUSED;
-            } else if (ext.initializer != null && ext.initializer!! != user) {
-                code = CODE_NOT_INITIALIZER;
             } else if (!taxValid(ext, self.isNative())) {
                 code = CODE_BAD_KEY;
             } else if (p.sqrtPriceInitX96 < MIN_SQRT_RATIO || p.sqrtPriceInitX96 >= MAX_SQRT_RATIO) {
@@ -700,7 +746,7 @@ contract Pool {
                 self.mintFailed(queryId, user, a0, a1, p, code);
                 return;
             }
-            self.refundDeposit(queryId, user, a0, a1, p.refundTo, code);
+            self.refundDeposit(queryId, user, a0, a1, p.refundTo, code, REASON_MINT_REFUND);
             return;
         }
 
@@ -749,7 +795,7 @@ contract Pool {
             }
         }
 
-        self.reserveKeep();
+        self.settle(k0);
         deploy(DeployParameters {
             init: initOf Position(myAddress(), index),
             value: POSITION_DEPLOY_VALUE,
@@ -894,6 +940,7 @@ contract Pool {
                 limit: lim,
                 maxCrossings,
                 t,
+                gasStop: swapGasStop(maxCrossings),
             });
         } catch (e) {
             ok = false;
@@ -1058,10 +1105,10 @@ contract Pool {
             REASON_SWAP_REFUND, msg.queryId, 0, null, true);
     }
 
-    fun refundDeposit(queryId: Int, user: Address, a0: Int, a1: Int, refundTo: Address, code: Int) {
+    fun refundDeposit(queryId: Int, user: Address, a0: Int, a1: Int, refundTo: Address, code: Int, reason: Int) {
         emit(RefundEvent { queryId, user, code }.toCell());
         self.reserveKeep();
-        self.payTwo(queryId, a0, a1, refundTo, refundTo, REASON_MINT_REFUND, 0);
+        self.payTwo(queryId, a0, a1, refundTo, refundTo, reason, 0);
     }
 
     fun notifyModify(hook: Address, queryId: Int, owner: Address, index: Int, tL: Int, tU: Int,
@@ -1154,16 +1201,41 @@ contract Pool {
             (self.isNative() ? self.reserve0 + self.protocolFees0 + self.hookFees0 + self.taxFees + self.platformFees : 0);
     }
 
-    // ReserveAtMost: under rent debt the balance can be below keep(); never fail the action phase.
+    // Native Gram the pool owes (LP reserve and every carried fee); 0 for a jetton/jetton pool.
+    fun owed(): Int {
+        return self.isNative() ? self.reserve0 + self.protocolFees0 + self.hookFees0 + self.taxFees + self.platformFees : 0;
+    }
+
+    // keep() as the baseline of settle(), taken before any state change of this message. An
+    // uninitialized pool (just deployed) has nothing to protect yet: its baseline is what it
+    // really holds, so the first message funds the whole keep() (POOL_MIN_STORAGE included).
+    fun k0(): Int {
+        let k = self.keep();
+        return self.initialized ? k : min(k, myBalance() - context().value);
+    }
+
+    // v3 (audit R2-H1, M-2, R2-M2): every handler reserves its balance before the message plus
+    // exactly what this message added to keep() (or minus what it released). So
+    //  - a surplus above keep() (Gram stranded by an earlier failed transaction, a donation) is
+    //    never handed to the caller; it stays until SweepPoolSurplus sends it to the treasury;
+    //  - a rent deficit below keep() is not charged to the caller: rent is paid from the pool's
+    //    rent fund (POOL_MIN_STORAGE, tick buffers, endowment), unless the Gram owed would be hit.
+    // ReserveAtMost: never fail the action phase.
+    fun settle(k0: Int) {
+        let b0 = myBalance() - context().value;
+        nativeReserve(max(b0 + self.keep() - k0, self.owed() + POOL_MIN_STORAGE), ReserveAtMost);
+    }
+
+    // A path with no state change (refunds, MintAccount hops).
     fun reserveKeep() {
-        nativeReserve(self.keep(), ReserveAtMost);
+        self.settle(self.k0());
     }
 
     // Collect / admin / hook ops (review issue 1): the caller gets back only its own value plus the
-    // Gram this op pays out (outGram), minus gas, never other balance above keep(). Called after
-    // the collected fees are zeroed, so keep() no longer counts outGram.
+    // Gram this op pays out (outGram), minus gas. Called after the collected fees are zeroed, so
+    // keep() no longer counts outGram: the baseline before this message was keep() + outGram.
     fun reserveForCaller(outGram: Int) {
-        nativeReserve(max(self.keep(), myBalance() - context().value - outGram), ReserveAtMost);
+        self.settle(self.keep() + outGram);
     }
 
     fun quoteAt(zeroForOne: Bool, amountIn: Int, sqrtPriceLimitX96: Int, maxCrossings: Int, refBps: Int,

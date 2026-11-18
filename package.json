@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tact --config dex/v2/tact.config.json && tact --config launch/tact.config.json && tact --config vaults/tact.config.json && tact --config fees/tact.config.json",
+    "build": "tact --config dex/v2/tact.config.json && tact --config launch/tact.config.json && tact --config vaults/tact.config.json && tact --config fees/tact.config.json && tact --config tools/assembler/tact.config.json",
     "test": "npm run build && jest"
   },
   "devDependencies": {

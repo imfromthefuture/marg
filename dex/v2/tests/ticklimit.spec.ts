@@ -135,13 +135,19 @@ describe('MAX_TICKS_PER_POOL = 8192', () => {
         const need = toNano('0.35') + 24n * toNano('0.006') + toNano('0.07');
         const res = await d.swapNative(d.bob, amount, d.tokA, { maxCrossings: 24n, allowPartial: true, gas: need + toNano('0.03') });
         expectNoFailures(res);
-        expect(swapEvents(res)[0].amountOut).toBe(e.out);
+        // v3 (audit R2-H1): on the full 8192-tick map the gas guard ends this swap early (STOP_GAS)
+        // instead of letting it approach the 1M limit: a partial fill of the same path, the rest
+        // refunded, never more than the model's full result.
+        const ev = swapEvents(res)[0];
         const g = gasAt(res, pool.address, 0x4d480021)[0];
         // eslint-disable-next-line no-console
-        console.log(`worst case on 8192 ticks: pool gas ${g}`);
-        expect(g).toBeLessThan(1_000_000n);
+        console.log(`worst case on 8192 ticks: pool gas ${g}, stop ${ev.stop}, steps ${ev.steps}, crossings ${ev.crossings}`);
+        expect(ev.amountOut).toBeLessThanOrEqual(e.out);
+        expect(ev.amountOut).toBeGreaterThan(0n);
+        if (ev.stop !== 5n) expect(ev.amountOut).toBe(e.out);
+        expect(g).toBeLessThan(900_000n);
         expect(g * PRICE).toBeLessThan(toNano('0.35') + 24n * toNano('0.006'));
-        await expectPoolEquals(pool, sim);
+        if (ev.stop !== 5n) await expectPoolEquals(pool, sim);
         void Address;
         void Cell;
     });

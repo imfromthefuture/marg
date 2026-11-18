@@ -1,4 +1,4 @@
-import { Address, beginCell, Builder, Cell, toNano, TupleReader, type TupleItem } from '@ton/core';
+import { Address, beginCell, Builder, Cell, contractAddress, toNano, TupleReader, type TupleItem } from '@ton/core';
 import {
     loadKeyExt, Router, storeJettonTransfer, storeMintNative, storeMintPayload, storePositionDecrease, storeSwapNative,
     storeSwapPayload, type KeyExt, type PoolKey, type PoolState, type Quote,
@@ -10,7 +10,7 @@ import { client, IS_TESTNET, openMaster, openWallet, parseContent, q, TONCENTER,
 import { launchFactory } from './launch';
 import { api } from './api';
 import { launchExtra, sqrtBand } from './dexmath';
-import { assertMargRouter, DEX_ROUTER, isLaunchToken, isMargRouter, isMissingGetter, KNOWN_TOKENS, knownToken } from './dexenv';
+import { assertMargRouter, DEX_ROUTER, DEX_ROUTERS, isLaunchToken, isMargRouter, isMissingGetter, KNOWN_TOKENS, knownToken } from './dexenv';
 
 export type { PoolKey, PoolState, Quote, LaunchInfo, PositionData };
 
@@ -76,7 +76,7 @@ const CODES: Record<number, string> = {
     223: 'No liquidity at this price', 229: 'Amount too large', 230: 'Bad price limit',
 };
 export const codeText = (code: bigint | number) => CODES[Number(code)] ?? `Refused (code ${code})`;
-export const STOPS = ['filled', 'price limit', 'crossing cap (24 ticks per transaction)', 'step cap', 'no more liquidity'];
+export const STOPS = ['filled', 'price limit', 'crossing cap (24 ticks per transaction)', 'step cap', 'no more liquidity', 'gas limit of one transaction'];
 
 export const openRouter = (a: Address) => client.open(Router.fromAddress(a));
 export const openPool = (a: Address) => client.open(Pool.fromAddress(a));
@@ -443,12 +443,34 @@ export async function myPositions(owner: Address, onPosition?: (p: MyPosition) =
     return out;
 }
 
+// Pool code of earlier Routers (code hash of the deployed Pool, built from the mainnet-v2 tag). A pool of
+// a past Router is genuine when its own code has one of these hashes and that code with initOf data
+// Pool(router, key) gives its address; the current Router's pools are derived from the bundled code.
+const PAST_POOL_CODE_HASHES = new Set([
+    '6813c538ded762550e3add2c58ecba178a63e92f71d3ff73ec0db4a3064e2c56', // v2 (Router EQDBEgfj…)
+]);
+
+async function poolRouter(address: Address, k: PoolKey): Promise<Address | null> {
+    if ((await Pool.fromInit(DEX_ROUTER!, k)).address.equals(address)) return DEX_ROUTER!;
+    const past = DEX_ROUTERS.filter((r) => !r.equals(DEX_ROUTER!));
+    if (past.length === 0) return null;
+    const st = await q(() => client.getContractState(address));
+    if (st.state !== 'active' || !st.code) return null;
+    const code = Cell.fromBoc(st.code)[0];
+    if (!PAST_POOL_CODE_HASHES.has(code.hash().toString('hex'))) return null;
+    for (const r of past) {
+        const data = (await Pool.fromInit(r, k)).init!.data;   // same init layout: (router, key)
+        if (contractAddress(0, { code, data }).equals(address)) return r;
+    }
+    return null;
+}
+
 async function genuinePool(address: Address): Promise<DexPool | null> {
     const state = await q(() => poolStateOf(address));
     const k = state.key;
-    const derived = (await Pool.fromInit(DEX_ROUTER!, k)).address;
-    if (!derived.equals(address)) return null;
+    const router = await poolRouter(address, k);
+    if (!router) return null;
     const [token0, token1] = [await tokenById(k.token0), await tokenById(k.token1)];
     const canonical = !!token1.launch && extOf(k)?.initializer?.equals(token1.master!) === true;
-    return { address, key: k, state, token0, token1, canonical, ext: extOf(k) };
+    return { address, key: k, state, token0, token1, canonical, ext: extOf(k), router };
 }

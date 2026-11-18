@@ -166,7 +166,9 @@ export function computeSwap(p: PoolModel, zfo: boolean, budget: bigint, limit: b
     const S = BigInt(s);
     const fs = { ...p.fs };
     const elapsed = bmax(0n, t - fs.lastTs);
-    if (elapsed >= fs.filterPeriod) {
+    const fresh = elapsed >= fs.filterPeriod;
+    const startIdx = fdivN(p.tick, s);
+    if (fresh) {
         fs.idxRef = BigInt(fdivN(p.tick, s));
         fs.volRef = elapsed < fs.decayPeriod ? (fs.volAcc * fs.reductionBps) / BPS : 0n;
     }
@@ -237,7 +239,8 @@ export function computeSwap(p: PoolModel, zfo: boolean, budget: bigint, limit: b
     // Meteora: the stored va is the one of the final active bin (final tick).
     if (steps > 0) va = bmin(fs.maxVolAcc, fs.volRef + babs(fs.idxRef - BigInt(fdivN(tick, s))) * VA_UNIT);
     fs.volAcc = va;
-    fs.lastTs = t;
+    // v3 (audit R2-L1): only a refresh or a move of the active index restarts the filter period.
+    if (fresh || fdivN(tick, s) !== startIdx) fs.lastTs = t;
     return { out, remaining: rem, feeTotal, proto, hook, sqrtP, tick, L, fg0, fg1, ticks, fs, crossings, steps, stop, lastFee };
 }
 
@@ -444,10 +447,11 @@ export class PoolSim {
         const fail = (code: number): MintOutcome => ({ code, liq: 0n, use0: 0n, use1: 0n, inside0: 0n, inside1: 0n, newTicks: 0 });
         const saved = { sqrtP: this.sqrtP, tick: this.tick };
         let initNow = false;
+        // v3 (audit M-1 / R2-M1): on a key with an initializer only the initializer adds liquidity.
+        if (this.ext.initializer !== null && !opts.userIsInitializer) return fail(CODES.NOT_INITIALIZER);
         if (!this.initialized) {
             if (sqrtInit === 0n) return fail(CODES.NOT_INITIALIZED);
             if (opts.allowInit === false) return fail(CODES.CREATION_PAUSED);
-            if (this.ext.initializer !== null && !opts.userIsInitializer) return fail(CODES.NOT_INITIALIZER);
             if (sqrtInit < MIN_SQRT_RATIO || sqrtInit >= MAX_SQRT_RATIO) return fail(CODES.PRICE_OUT_OF_RANGE);
             this.sqrtP = sqrtInit;
             this.tick = tickAt(sqrtInit);

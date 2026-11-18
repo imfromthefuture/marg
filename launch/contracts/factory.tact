@@ -31,6 +31,8 @@ const VAULT_MAX_BPS: Int = 5000;               // creator vault: at most 50% of 
 const VAULT_MIN_LOCK: Int = 604800;            // 7 days
 const VAULT_MAX_LOCK: Int = 31536000;          // 365 days
 const VAULT_MAX_VEST: Int = 31536000;          // 365 days (0 = everything unlocks at the end of the lock)
+// Creators kept for the bounced handler: the last FACTORY_PENDING launches (older entries are dropped).
+const FACTORY_PENDING: Int = 16;
 const Q192: Int = 0x1000000000000000000000000000000000000000000000000;     // 2^192
 
 contract LaunchFactory {
@@ -41,8 +43,18 @@ contract LaunchFactory {
     launchFee: Int as coins;        // the admin can only lower it
     tiers: LaunchTiers;             // low / mid / high liquidity
     nextIndex: Int as uint64;
+    // v3: the Marg DEX v2 Pool code (hash and depth, immutable). Every master derives its own pool
+    // address from it and accepts tax payouts only from that pool (audit L-4).
+    poolCodeHash: Int as uint256;
+    poolCodeDepth: Int as uint16;
+    // v3: index -> creator of the last FACTORY_PENDING launches, for the bounced handler only.
+    pending: map<Int as uint64, Address>;
 
-    init(admin: Address, treasury: Address, router: Address, launchFee: Int, tiers: LaunchTiers) {
+    init(admin: Address, treasury: Address, router: Address, launchFee: Int, tiers: LaunchTiers,
+         poolCodeHash: Int, poolCodeDepth: Int) {
+        require(isBasechain(admin) && isBasechain(treasury) && isBasechain(router), "Invalid address");
+        self.poolCodeHash = poolCodeHash;
+        self.poolCodeDepth = poolCodeDepth;
         self.admin = admin;
         self.pendingAdmin = null;
         self.treasury = treasury;
@@ -55,6 +67,9 @@ contract LaunchFactory {
     receive(msg: CreateToken) {
         let ctx = context();
         let creator = ctx.sender;
+        // Audit L-5: the DEX refuses a non-basechain refund / dev-buy receiver, so such a launch could only
+        // fail. Refused here (bounced: the whole value goes back) before anything is deployed.
+        require(isBasechain(creator), "Creator not on basechain");
         require(taxOk(msg.buyTaxBps) && taxOk(msg.sellTaxBps), "Tax out of range");
         require(msg.antiSnipePips <= ANTI_SNIPE_CAP_PIPS && msg.antiSnipeDuration <= ANTI_SNIPE_MAX_DURATION &&
             (msg.antiSnipePips > 0) == (msg.antiSnipeDuration > 0), "Invalid anti-snipe fee");
@@ -83,7 +98,7 @@ contract LaunchFactory {
             require(rewardsBps + walletBps + buybackBps == BPS_100, "Split must sum to 100%");
             if (walletBps > 0) {
                 taxWallet = msg.taxWallet != null ? msg.taxWallet!! : creator;
-                require(parseStdAddress(taxWallet!!.asSlice()).workchain == 0 && taxWallet!! != self.router, "Invalid tax wallet");
+                require(isBasechain(taxWallet!!) && taxWallet!! != self.router && taxWallet!! != myAddress(), "Invalid tax wallet");
             }
         }
 
@@ -91,7 +106,14 @@ contract LaunchFactory {
         self.nextIndex += 1;
         let init = initOf LaunchJetton(myAddress(), index);
         let master = contractAddress(init);
-        require(taxWallet == null || taxWallet!! != master, "Invalid tax wallet");
+        // Not the master, and not the token's creator vault: the vault only accepts Gram (plain top-ups)
+        // and can never send it out, so the wallet share of the tax would be locked there for good.
+        require(taxWallet == null || (taxWallet!! != master && taxWallet!! != contractAddress(initOf LaunchVault(master))),
+            "Invalid tax wallet");
+        self.pending.set(index, creator);
+        if (index >= FACTORY_PENDING) {
+            self.pending.set(index - FACTORY_PENDING, null);
+        }
 
         emit(TokenLaunched {
             queryId: msg.queryId, index, master, creator, devBuy: msg.devBuy,
@@ -100,16 +122,9 @@ contract LaunchFactory {
             vaultBps: msg.vaultBps, vaultLock, vaultVest,
         }.toCell());
 
+        // v3: the launch fee travels with the launch and is held by the master until the outcome is known:
+        // a launch the DEX refuses returns it to the creator, a successful one pays it to the treasury.
         nativeReserve(max(myBalance() - ctx.value, FACTORY_MIN_STORAGE), ReserveAtMost);
-        if (self.launchFee > 0) {
-            message(MessageParameters {
-                to: self.treasury,
-                value: self.launchFee,
-                mode: SendPayGasSeparately,
-                bounce: false,
-                body: "Launch fee".asComment(),
-            });
-        }
         deploy(DeployParameters {
             init,
             value: 0,
@@ -117,6 +132,7 @@ contract LaunchFactory {
             bounce: true,
             body: LaunchSetup {
                 queryId: msg.queryId,
+                index,
                 content: msg.content,
                 info: LaunchInfo {
                     creator,
@@ -143,6 +159,9 @@ contract LaunchFactory {
                 devBuy: msg.devBuy,
                 minDevOut: msg.minDevOut,
                 routerValue: ROUTER_LAUNCH_VALUE + (msg.devBuy > 0 ? ROUTER_DEV_VALUE + msg.devBuy : 0),
+                launchFee: self.launchFee,
+                poolCodeHash: self.poolCodeHash,
+                poolCodeDepth: self.poolCodeDepth,
             }.toCell(),
         });
     }
@@ -177,13 +196,14 @@ contract LaunchFactory {
 
     receive(msg: SetTreasury) {
         self.requireAdmin();
-        require(parseStdAddress(msg.treasury.asSlice()).workchain == 0, "Invalid treasury");
+        require(isBasechain(msg.treasury), "Invalid treasury");
         self.treasury = msg.treasury;
         self.refund(msg.queryId);
     }
 
     receive(msg: TransferAdmin) {
         self.requireAdmin();
+        require(isBasechain(msg.newAdmin), "Invalid admin");
         self.pendingAdmin = msg.newAdmin == self.admin ? null : msg.newAdmin;
         self.refund(msg.queryId);
     }
@@ -208,6 +228,31 @@ contract LaunchFactory {
     }
 
     receive() {}
+
+    // v3: the new master could not run LaunchSetup (it cannot in practice: the factory checks everything
+    // and funds it). Nothing was minted; the whole returned value (launch fee and dev buy included) goes
+    // back to the creator. If the creator is no longer known (more than FACTORY_PENDING launches
+    // ago) the Gram stays here for the admin to return by hand (WithdrawExcess -> treasury).
+    bounced(msg: bounced<LaunchSetup>) {
+        let ctx = context();
+        let creator = self.pending.get(msg.index);
+        emit(LaunchBounced { queryId: msg.queryId, index: msg.index, creator, value: ctx.value }.toCell());
+        if (creator == null || ctx.sender != contractAddress(initOf LaunchJetton(myAddress(), msg.index))) {
+            return;
+        }
+        self.pending.set(msg.index, null);
+        nativeReserve(max(myBalance() - ctx.value, FACTORY_MIN_STORAGE), ReserveAtMost);
+        message(MessageParameters {
+            to: creator!!,
+            value: 0,
+            mode: SendRemainingBalance | SendIgnoreErrors,
+            bounce: false,
+            body: JettonExcesses { queryId: msg.queryId }.toCell(),
+        });
+    }
+
+    // Any other bounce: the value stays here.
+    bounced(msg: Slice) {}
 
     // -----------------------------------------------------------------------
 
@@ -257,6 +302,11 @@ contract LaunchFactory {
             tiers: self.tiers,
             nextIndex: self.nextIndex,
         };
+    }
+
+    // v3: the DEX Pool code this factory's tokens trust (hash, depth).
+    get fun get_pool_code(): PoolCode {
+        return PoolCode { hash: self.poolCodeHash, depth: self.poolCodeDepth };
     }
 
     get fun get_token_address(index: Int): Address {

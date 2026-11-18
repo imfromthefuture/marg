@@ -12,6 +12,7 @@ import { LaunchWallet } from '../build/Launch_LaunchWallet';
 import { LaunchVault } from '../build/Launch_LaunchVault';
 import { Router } from '../../dex/v2/build/Router_Router';
 import { Pool } from '../../dex/v2/build/Router_Pool';
+import { poolCodeArgs } from './poolcode';
 import { txOk, events } from '../../dex/v2/tests/helpers';
 
 jest.setTimeout(600000);
@@ -95,7 +96,7 @@ describe('Marg direct launch: creator vault', () => {
         carol = await chain.treasury('carol', { balance: toNano('100000') });
         router = chain.openContract(await Router.fromInit(admin.address, treasury.address));
         await router.send(admin.getSender(), { value: toNano('1') }, null);
-        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS));
+        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS, ...(await poolCodeArgs())));
         await factory.send(admin.getSender(), { value: toNano('0.5') }, null);
         base = chain.snapshot();
     });

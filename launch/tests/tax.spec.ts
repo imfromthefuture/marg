@@ -19,6 +19,7 @@ import {
     Router, storeSwapPayload, storeMintPayload, storeSwapNative as storeSwapNativeD, storeCollectTax as storeCollectTaxD, storeGramPayout as storeGramPayoutD,
 } from '../../dex/v2/build/Router_Router';
 import { Pool } from '../../dex/v2/build/Router_Pool';
+import { poolCodeArgs } from './poolcode';
 import { txOk, events, swapEvents, refundCodes, opOf, gramPayouts, REASON, CODES } from '../../dex/v2/tests/helpers';
 
 jest.setTimeout(900000);
@@ -47,7 +48,8 @@ function tactConst(file: string, n: string): bigint {
 const J = (n: string) => tactConst('../contracts/jetton.tact', n);
 const D = (n: string) => tactConst('../../dex/v2/contracts/constants.tact', n);
 const C = {
-    CHECKPOINT_VALUE: J('CHECKPOINT_VALUE'), TAX_IN_GAS: J('TAX_IN_GAS'), BUYBACK_GAS: J('BUYBACK_GAS'), KEEPER_FEE: J('KEEPER_FEE'),
+    CP_MASTER_GAS: J('CP_MASTER_GAS'), ACK_GAS: J('ACK_GAS'), CLAIM_MASTER_GAS: J('CLAIM_MASTER_GAS'), CLAIM_WALLET_GAS: J('CLAIM_WALLET_GAS'),
+    TAX_IN_GAS: J('TAX_IN_GAS'), BUYBACK_GAS: J('BUYBACK_GAS'), KEEPER_FEE: J('KEEPER_FEE'),
     HARVEST_VALUE: J('HARVEST_VALUE'), BUYBACK_MIN: J('BUYBACK_MIN'), INTERVAL: Number(J('BUYBACK_INTERVAL')),
     HARVEST_INTERVAL: Number(J('HARVEST_INTERVAL')), MIN_STORAGE: J('MASTER_MIN_STORAGE'), BURN_FWD: J('BURN_FWD'),
     // DEX: the tax auto-payout threshold and the value each payout carries on top of the tax.
@@ -212,7 +214,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         mallory = await chain.treasury('mallory', { balance: toNano('1000000') });
         router = chain.openContract(await Router.fromInit(admin.address, treasury.address));
         await router.send(admin.getSender(), { value: toNano('1') }, null);
-        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS));
+        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS, ...(await poolCodeArgs())));
         await factory.send(admin.getSender(), { value: toNano('0.5') }, null);
         base = chain.snapshot();
     });
@@ -310,13 +312,23 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         expect(paid[0]).toBeGreaterThanOrEqual(sp2.wallet);
         expect(paid[0]).toBeLessThan(sp2.wallet + toNano('0.3'));
 
-        // A forged GramPayout claiming a huge tax splits only what it carries (minus the split's own gas).
-        const res3 = await chain.sendMessage(internal({
-            from: mallory.address, to: master.address, value: toNano('1'),
-            body: beginCell().store(storeGramPayoutL({ $$type: 'GramPayout', queryId: 0n, reason: 14n, amount: toNano('1000'), payload: null })).endCell(),
-        }));
-        const [sp3] = splitEvents(res3.transactions);
-        expect(sp3.amount).toBe(toNano('1') - C.TAX_IN_GAS);
+        // v3 (audit L-4): a forged GramPayout (reason TAX) from anyone but the pool is not a tax: no split,
+        // no counter moves; its Gram is a plain donation that goes to the creator.
+        const js = (o: any) => JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+        const before = js({ tax: await master.getGetTaxData(), bb: await master.getGetBuybackStatus(), rw: await master.getGetRewardsData() });
+        const forged = beginCell().store(storeGramPayoutL({ $$type: 'GramPayout', queryId: 0n, reason: 14n, amount: toNano('1000'), payload: null })).endCell();
+        for (const from of [mallory.address, router.address, creator.address]) {
+            const res3 = await chain.sendMessage(internal({ from, to: master.address, value: toNano('1'), body: forged }));
+            expectNoFailures(res3);
+            expect(splitEvents(res3.transactions)).toEqual([]);
+            expect(res3.transactions).toHaveTransaction({ from: master.address, to: creator.address });
+        }
+        expect(js({ tax: await master.getGetTaxData(), bb: await master.getGetBuybackStatus(), rw: await master.getGetRewardsData() })).toBe(before);
+        // The same message from the pool itself is a tax payout: it splits what it carries (minus the split's own gas).
+        expect((await master.getGetPoolAddress()).equals(pool.address)).toBe(true);
+        const res4 = await chain.sendMessage(internal({ from: pool.address, to: master.address, value: toNano('1'), body: forged }));
+        const [sp4] = splitEvents(res4.transactions);
+        expect(sp4.amount).toBe(toNano('1') - C.TAX_IN_GAS);
     });
 
     it('rewards are pro-rata to tracked balances across transfers interleaved with accruals; late receivers get nothing earlier', async () => {
@@ -759,7 +771,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         // Drain bound, on a token whose buyback pays no tax (sell tax only): a due harvest that finds no tax
         // costs the bucket at most HARVEST_VALUE + KEEPER_FEE, and in practice only the fees.
         const t2 = await launch({ buyTaxBps: 0n, sellTaxBps: 500n, buybackBps: 10000n });
-        await chain.sendMessage(internal({ from: mallory.address, to: t2.master.address, value: toNano('3'),
+        await chain.sendMessage(internal({ from: t2.pool.address, to: t2.master.address, value: toNano('3'),
             body: beginCell().store(storeGramPayoutL({ $$type: 'GramPayout', queryId: 0n, reason: 14n, amount: toNano('3'), payload: null })).endCell() }));
         const s2 = await t2.master.getGetBuybackStatus();
         expect(s2.count).toBe(1n);
@@ -795,9 +807,9 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         console.log(`BUYBACK_GAS ${C.BUYBACK_GAS}: Router minimum on a taxed launch key ${taxedKey} + BURN_FWD ${C.BURN_FWD} = ${need}, margin ${margin} (before 2 forward fees)`);
         expect(margin).toBeGreaterThanOrEqual(toNano('0.1'));
         // In practice: a due buyback at exactly bucket = BUYBACK_GAS + BUYBACK_MIN on the taxed key is not refunded by the Router.
-        await chain.sendMessage(internal({ from: mallory.address, to: taxed.master.address, value: C.BUYBACK_MIN + C.BUYBACK_GAS + C.TAX_IN_GAS,
+        await chain.sendMessage(internal({ from: taxed.pool.address, to: taxed.master.address, value: C.BUYBACK_MIN + C.BUYBACK_GAS + C.TAX_IN_GAS,
             body: beginCell().store(storeGramPayoutL({ $$type: 'GramPayout', queryId: 0n, reason: 14n, amount: C.BUYBACK_MIN + C.BUYBACK_GAS, payload: null })).endCell() }));
-        // (the forged payout above credited the bucket, and that was the auto-run; check it was a real swap)
+        // (the payout above, sent as the pool, credited the bucket, and that was the auto-run; check it was a real swap)
         const st = await taxed.master.getGetBuybackStatus();
         expect(st.count).toBe(1n);
         expect(st.burned).toBeGreaterThan(0n);
@@ -825,10 +837,15 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             });
             expectNoFailures(r);
         }
-        expect((await pool.getGetPoolState()).tickCount - ps0.tickCount).toBe(31n);
-        // The old setting (4 crossings, no partial) is refunded on this pool.
-        const old = await router.send(mallory.getSender(), { value: toNano('26.7') }, { ...swapNativeBody(key, toNano('26')), maxCrossings: 4n });
-        expect(refundCodes(old)).toEqual([CODES.PARTIAL_NOT_ALLOWED]);
+        // dex/v2 v3 refuses third-party positions on launch keys (review M-1): then no dust tick can be planted at all
+        // (every mint above was refunded) and the buyback simply fills. With a v2 DEX build the 30 positions exist.
+        const planted = (await pool.getGetPoolState()).tickCount - ps0.tickCount;
+        expect([0n, 31n]).toContain(planted);
+        if (planted === 31n) {
+            // The old setting (4 crossings, no partial) is refunded on this pool.
+            const old = await router.send(mallory.getSender(), { value: toNano('26.7') }, { ...swapNativeBody(key, toNano('26')), maxCrossings: 4n });
+            expect(refundCodes(old)).toEqual([CODES.PARTIAL_NOT_ALLOWED]);
+        }
         chain.now = T0 + C.INTERVAL;
         const { balance: bal0, spent: spent0, burned: burned0 } = await master.getGetBuybackStatus();
         const supply0 = (await master.getGetJettonData()).totalSupply;
@@ -840,7 +857,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         // On spacing 10 a capped buyback (1% of the start mcap) moves the price by at most ~2% (~200 ticks) even
         // at the start price, so it can cross at most ~20 initialized ticks: below BUYBACK_CROSSINGS (24), it
         // always fills completely (allowPartial stays as the safety net for any denser case).
-        expect(sw[0].crossings).toBeGreaterThanOrEqual(10n);
+        if (planted === 31n) expect(sw[0].crossings).toBeGreaterThanOrEqual(10n);
         expect(sw[0].crossings).toBeLessThan(24n);
         expect(gramPayouts(res, master.address).filter((x) => x.reason === REASON.PARTIAL_REFUND)).toEqual([]);
         expect(sw[0].amountIn).toBe(toNano('26'));
@@ -991,26 +1008,37 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         // The value a transfer needs: unchanged for plain wallets; + 2 checkpoints for tracked -> tracked.
         let low = await transfer(plain.master, a, b.address, 1000n, toNano('0.06'));
         expectNoFailures(low);
-        low = await transfer(taxed.master, a, b.address, 1000n, toNano('0.1'));
-        expect(low.transactions).toHaveTransaction({ to: (await walletOf(taxed.master, a.address)).address, success: false });
+        // (v3: what a transfer needs is priced at the chain's gas price: the wallet's get_transfer_fee, here with 2 checkpoints.)
+        const wa0 = await walletOf(taxed.master, a.address);
+        const need = await wa0.getGetTransferFee(b.address);
+        expect(need - await (await walletOf(plain.master, a.address)).getGetTransferFee(b.address)).toBe(2n * (await taxed.master.getGetRewardValues()).checkpoint);
+        low = await transfer(taxed.master, a, b.address, 1000n, need);
+        expect(low.transactions).toHaveTransaction({ to: wa0.address, success: false });
+        expectNoFailures(await transfer(taxed.master, a, b.address, 1000n, need + toNano('0.002')));
         const p = await measure(plain.master);
         const t = await measure(taxed.master);
         expect(p.res.transactions.some((tx) => dst(tx)?.equals(plain.master.address))).toBe(false);
         expect(t.res.transactions.filter((tx) => dst(tx)?.equals(taxed.master.address)).length).toBe(2);   // two checkpoints
         const wa = await walletOf(taxed.master, a.address), wb = await walletOf(taxed.master, b.address);
         const pa = await walletOf(plain.master, a.address), pb = await walletOf(plain.master, b.address);
-        // The round trip must stay well under CHECKPOINT_VALUE (1.5x margin).
+        // v3: the reward values are gas amounts priced by the chain config; the measured gas must stay under them (1.5x / 2x margins).
         const cpTx = t.res.transactions.filter((tx) => dst(tx)?.equals(taxed.master.address));
         const ackTx = t.res.transactions.filter((tx) => opOf(tx) === OPS.ack);
         // At the mainnet basis of 400 nanoGram/gas (the sandbox charges ~66.7): gas * 400 + forward fees, x1.5 margin.
         const g = (tx: BlockchainTransaction) => BigInt((tx.description as any).computePhase.gasUsed);
         const roundTrip = (g(cpTx[0]) + g(ackTx[0])) * 400n + toNano('0.0015');
-        expect(roundTrip * 3n / 2n).toBeLessThanOrEqual(C.CHECKPOINT_VALUE);
+        expect(g(cpTx[0]) * 3n / 2n).toBeLessThanOrEqual(C.CP_MASTER_GAS);
+        expect(g(ackTx[0]) * 2n).toBeLessThanOrEqual(C.ACK_GAS);
+        const rv = await taxed.master.getGetRewardValues();
+        expect(rv).toEqual(await wa.getGetRewardValues());
+        // Every checkpoint message carried at least what the master requires, and every ack was processed.
+        for (const tx of cpTx) expect(valueIn(tx)).toBeGreaterThan(rv.checkpoint * 9n / 10n);
+        for (const tx of ackTx) expect(txOk(tx)).toBe(true);
         // eslint-disable-next-line no-console
         console.log([
             `transfer, no rewards: ${p.n} txs, gas sender ${p.gas(pa.address)} receiver ${p.gas(pb.address)}, fees+fwd ${p.fees + p.fwd}`,
             `transfer, rewards on: ${t.n} txs, gas sender ${t.gas(wa.address)} receiver ${t.gas(wb.address)} master ${t.gas(taxed.master.address)}, fees+fwd ${t.fees + t.fwd}`,
-            `checkpoint round trip at 400 nanoGram/gas ${roundTrip} (CHECKPOINT_VALUE ${C.CHECKPOINT_VALUE})`,
+            `checkpoint round trip at 400 nanoGram/gas ${roundTrip}; values at the sandbox gas price: ${JSON.stringify(rv, (_, v) => typeof v === 'bigint' ? v.toString() : v)}`,
         ].join('\n'));
         // Claim gas.
         await collect(taxed.key);

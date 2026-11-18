@@ -427,7 +427,7 @@ describe('fee converter', () => {
             expect(cd.router.equals(d.router.address)).toBe(true);
             expect(cd.keeper!.equals(keeper.address)).toBe(true);
             expect(cd.reserve).toBe(RESERVE);
-            expect(await convertValue(24n)).toBe(toNano('0.35') + 24n * toNano('0.006') + toNano('0.06') + toNano('0.12'));
+            expect(await convertValue(24n)).toBe(toNano('0.35') + 24n * toNano('0.006') + toNano('0.1') + toNano('0.12'));   // v3: margin 0.06 -> 0.1 (M-3)
             // Below the auto-forward threshold Gram accumulates; Flush sends it, the reserve stays.
             expectNoFailures(await conv.send(mallory.getSender(), { value: toNano('0.01') }, { $$type: 'Flush', queryId: 0n }));
             expect(await gram(conv.address)).toBeLessThanOrEqual(RESERVE);

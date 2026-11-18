@@ -13,8 +13,8 @@ import "./messages";
 
 const VAULT_MIN_STORAGE: Int = ton("0.03");         // kept for storage (the master funds it with VAULT_DEPLOY_VALUE)
 // Minimum ClaimVault value: vault compute + JettonTransfer to its (untracked) wallet, which needs
-// > fwd fee + 2 * WALLET_GAS 0.015 + WALLET_MIN_STORAGE 0.01, and the beneficiary's wallet, which
-// checkpoints (tracked) only with >= CHECKPOINT_VALUE 0.03 + WALLET_MIN_STORAGE + WALLET_GAS. The rest comes back.
+// > fwd fee + walletHopsFee() (~0.034 at 400 nanoGram/gas) + WALLET_MIN_STORAGE 0.01, and the beneficiary's wallet,
+// which checkpoints (tracked) only with >= checkpointValue() (~0.026 at 400) + WALLET_MIN_STORAGE + its compute. The rest comes back.
 const VAULT_CLAIM_VALUE: Int = ton("0.15");
 
 contract LaunchVault {

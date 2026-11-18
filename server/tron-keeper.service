@@ -10,7 +10,7 @@ WorkingDirectory=/opt/tron-keeper
 Environment=NETWORK=mainnet
 Environment=INDEXER_URL=http://127.0.0.1:8811/api/idx/tokens?kind=dex
 # Allowlist: only masters these factories derive are called (same list as the indexer).
-Environment=LAUNCH_FACTORY=EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb
+Environment=LAUNCH_FACTORY=EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb,EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1
 Environment=KEEPER_INTERVAL_SEC=600
 Environment=KEEPER_MIN_TAX=0.5
 Environment=KEEPER_MIN_BALANCE=0.3

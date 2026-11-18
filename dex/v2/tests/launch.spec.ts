@@ -206,7 +206,7 @@ describe('direct launch', () => {
         expectNoFailures(res);
         expect(refundCodes(res)).toEqual([CODES.SLIPPAGE]);
         expect(swapEvents(res)).toEqual([]);
-        expect(gramPayouts(res, d.alice.address).filter((x) => x.reason === REASON.SWAP_REFUND).map((x) => x.amount)).toEqual([dev]);
+        expect(gramPayouts(res, d.alice.address).filter((x) => x.reason === REASON.LAUNCH_DEVBUY_REFUND).map((x) => x.amount)).toEqual([dev]);
         const s2 = new M.PoolSim(200, extM());
         s2.launch(SQRT, JET, BigInt(d.now), M.PRESETS[200]);
         await expectPoolEquals(pool, s2);
@@ -270,7 +270,7 @@ describe('direct launch', () => {
         expectNoFailures(res);
         expect(refundCodes(res)).toEqual([CODES.ALREADY_INITIALIZED]);
         expect(await d.jBal(d.jA, d.bob.address)).toBe(jb + JET);
-        expect(gramPayouts(res, d.bob.address).filter((x) => x.reason === REASON.MINT_REFUND).map((x) => x.amount)).toEqual([toNano('3')]);
+        expect(gramPayouts(res, d.bob.address).filter((x) => x.reason === REASON.LAUNCH_REFUND).map((x) => x.amount)).toEqual([toNano('3')]);
         await expectPoolEquals(pool, sim);
         await d.checkSolvency([pool]);
     });

@@ -103,8 +103,8 @@ the supply.
 | `0x4d4c0030` | `RewardCheckpoint` | Wallet → Master | queryId; delta: int64; owner |
 | `0x4d4c0031` | `RewardClaim` | Wallet → Master | queryId; delta; owner; acked; lastAcc: uint256; frac: uint64; owed |
 | `0x4d4c0032` | `RewardAck` | Master → Wallet (non-bounceable) | queryId; acc: uint256; delta; claim: Bool; frac |
-| `0x4d4c0033` | `ClaimRewards` | owner → own Wallet | queryId (attach ≥ 0.04 Gram; the rest comes back with the rewards) |
-| `0x4d4c0034` | `SyncRewards` | owner → own Wallet | queryId (attach ≥ 0.03 Gram): report the balance again and refresh `owed` |
+| `0x4d4c0033` | `ClaimRewards` | owner → own Wallet | queryId (attach ≥ `get_reward_values().claim`, priced from the chain's gas price, ~0.01 Gram today; the rest comes back with the rewards) |
+| `0x4d4c0034` | `SyncRewards` | owner → own Wallet | queryId (attach ≥ `get_reward_values().sync`): report the balance again and refresh `owed` |
 | `0x4d4c0035` | `Harvest` | anyone → Master | queryId. Collects the pool's accrued tax (taxed tokens, any split; tax ≥ 0.1 Gram is already auto-paid in the swaps, so this is for the rest). Bucket-paid when due (buyback on, ≥ 1 h since the last harvest, bucket ≥ 0.24): the caller's whole value is refunded. Otherwise caller-paid: attach ≥ `get_harvest_value()` = 0.24 Gram (the rest is refunded), ≥ 60 s since the last harvest. |
 | `0x4d4c0036` | `Buyback` | anyone → Master | queryId. Runs a due buyback now (same guards as the automatic run). The caller's whole value is refunded. |
 | `0x4d4c0022` | `TaxSplitEvent` (event) | Master → external | amount; rewards; wallet; buyback; extra |
@@ -441,3 +441,23 @@ npx jest launch/tests                         # 42 tests (launch.spec 14, tax.sp
 - **Bucket drain by keepers.** A due `Harvest` that finds no tax costs the bucket about 0.05 Gram
   (cap 0.24) at most once per hour. Caller-paid harvests (every 60 s) cost the bucket nothing.
 - **Content** is stored as given (TEP-64 cell). The factory does not validate metadata.
+
+## v3 changes
+
+v3 is the current deployment (factory `EQD3iwBt…`); tokens of the v2 factory (git tag `mainnet-v2`) keep
+their v2 contracts.
+
+- `LaunchFactory` init takes the DEX Pool code hash and depth (`get_pool_code()`); every master
+  derives its own pool address (`get_pool_address()`) and accepts tax payouts only from it.
+- The launch fee is held by the master until the launch completes, and refunded with the rest when it
+  fails. A bounced `LaunchSetup` is refunded by the factory (event `LaunchBounced`, 0x4d4c0025).
+- The master settles the launch fee only on outcomes nobody else can cause: the Pool's launch refund
+  reasons (17 refused, 18 dev buy refunded), its own excess, the dev payout's excess, the supply
+  coming back, or the timeout.
+- Creator, tax wallet and other addresses must be basechain; the tax wallet may not be the vault,
+  master, factory or Router. `TakeWalletAddress` answers addr_none for owners that cannot have a wallet.
+- Reward message values are priced from the gas config: `get_reward_values()` on the master and the
+  wallet, and `get_transfer_fee(destination)` on the wallet. An underfunded reward message bounces.
+- No buyback runs before the anti-snipe window has ended (`get_buyback_status().nextAllowedAt`).
+- New getter `get_launch_state()` on the master. The fee converter can claim its own holder rewards
+  (`ClaimJettonRewards`, 0x4d46000a) and keeps a larger swap margin (`get_convert_value`).

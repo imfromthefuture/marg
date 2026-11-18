@@ -82,7 +82,7 @@ The design is called "Tick-CL+" (DESIGN §0). Ticks beat bins on TON because of 
 |---|---|---|
 | Synchronous before/after hooks with return deltas, flash accounting | Cross-contract calls are asynchronous messages. | Hooks are asynchronous notifications sent with `bounce:false` and fixed gas. They cannot block, delay or change a trade. Fee control and fee share are declared in the key and visible in quotes. |
 | Singleton PoolManager | One account per pool keeps the state small, and the tick map is a dictionary. | A Router holds jetton custody, and there is one Pool contract per key. Jettons move only on a `PayTo` that the Router authenticates by recomputing the pool address from the full key. |
-| Unbounded tick walks | Each transaction is capped at 1M gas. | At most 24 crossings and 48 steps per swap. When a swap stops early, `allowPartial` fills part and refunds the rest. The Router requires gas for the user's own worst case. |
+| Unbounded tick walks | Each transaction is capped at 1M gas. | At most 24 crossings and 48 steps per swap, and the swap loop stops once it has used the gas the user paid for (`swapGasStop(maxCrossings)`, at most 650k; stop reason 5, `STOP_GAS`), so a swap can never run out of gas in the Pool. When a swap stops early, `allowPartial` fills part and refunds the rest. The Router requires gas for the user's own worst case. |
 | Tick bitmap | Dictionaries support next-key lookups. | `DICTIGETNEXT` / `DICTIGETPREVEQ` run directly on the tick map. |
 | `balanceOf` settlement | Jettons sit in per-owner wallets, and a contract only hears about them through `transfer_notification` from its own wallet. | Reserves are tracked in storage. The token is the sending wallet. Every failure is an explicit refund. |
 | Storage costs gas once | TON charges storage rent continuously. | Each pool keeps a buffer (`keep()`): a base amount, 0.02 Gram per tick (refundable), and a permanent endowment of 0.1 Gram per tick ever created. |
@@ -421,3 +421,25 @@ use the TAX plugin, never transfer fees.
     leg cannot redirect a victim's real leg); launch/graduation keys bypass `SetCreationPaused`.
     Residual: a forged leg can still grief a pending two-leg mint (both legs are refunded, the user
     resends); the pause cannot stop anyone from creating launch-shaped keys.
+
+## v3 changes
+
+v3 is the current deployment; v2 (git tag `mainnet-v2`) stays live for its pools.
+
+- **Gas stop.** The swap loop measures `gasConsumed()` and stops at `swapGasStop(maxCrossings)` =
+  min(650k, 2/3 of the gas the Router charged for), with stop reason `STOP_GAS` (5). A swap then fills
+  partly or is refunded; it never aborts in the Pool.
+- **Pool reserve rule.** Every success path reserves `max(balance_before + keep() - k0, owed() +
+  POOL_MIN_STORAGE)`, so a caller is never paid Gram the pool did not account for, and storage rent
+  is paid from the pool's own buffer, never from a caller's value.
+- **`SweepPoolSurplus`** (0x4d48001f, anyone → Router, ≥ `COLLECT_GAS`): sends a pool's Gram above
+  `keep()` to the treasury (`GramPayout` reason 16).
+- **Launch keys.** On a key with an `initializer`, only the initializer can add liquidity (code 218);
+  other mints are refunded.
+- **Treasury** must be a basechain address (`init`, `SetTreasury`).
+- `CollectTax`, `CollectPlatformFees`, `CollectProtocolFees` and `SweepPoolSurplus` reach the pool
+  with a non-bounceable deploy, so a call for a missing pool returns the value to the caller.
+- `PoolLaunch` refunds have their own `GramPayout` reasons: 17 (launch refused, only for the
+  initializer's own launch) and 18 (launch done, the dev buy could not fill). A refused decrease keeps
+  the pool's whole prior balance.
+- The volatility reference time only moves when the fee state was refreshed or the price left its bin.

@@ -20,7 +20,14 @@ const TOTAL_SUPPLY: Int = 1000000000000000000;      // 1,000,000,000 tokens, 9 d
 const MASTER_MIN_STORAGE: Int = ton("0.05");
 const LAUNCH_DEADLINE: Int = 600;                   // seconds the launch transfer may take to reach the pool
 const WALLET_MIN_STORAGE: Int = ton("0.01");
-const WALLET_GAS: Int = ton("0.015");
+// v3 (audit L-2): what a transfer must carry is priced with the chain's current config instead of a fixed
+// 2 x 0.015 Gram (sized for 400 nanoGram/gas): the two wallets' compute and the forward fee of the
+// internal transfer with the wallet StateInit. At today's 66.7 nanoGram/gas a transfer of a rewards
+// token between tracked holders needs ~0.026 Gram in all (a standard 0.05 works), ~0.10 at 400.
+const WALLET_SEND_GAS: Int = 27000;                 // sender's wallet (transfer / burn, tracked): 17.8k gas measured, x1.5
+const WALLET_RECV_GAS: Int = 25000;                 // receiver's wallet (tracked): 16.3k gas measured, x1.5
+const WALLET_INIT_CELLS: Int = 80;                  // upper bound of the wallet StateInit + body (63 code cells, ~27k bits;
+const WALLET_INIT_BITS: Int = 32000;                //   launch/tests check the build against it)
 const BPS_100: Int = 10000;
 
 // --- creator vault ---
@@ -29,9 +36,18 @@ const VAULT_WALLET_VALUE: Int = ton("0.03");        // the vault's jetton wallet
 
 // --- holder rewards ---
 const REWARD_SCALE: Int = 1000000000000000000;      // 1e18: acc is nanoGram per share * 1e18
-const CHECKPOINT_VALUE: Int = ton("0.03");          // wallet -> master -> wallet: 38.9k gas + 2 fwd = 0.017 at 400 nanoGram/gas, x1.75
-const CLAIM_VALUE: Int = ton("0.04");               // minimum ClaimRewards value: 53k gas + ack + fwd = 0.027 at 400/gas, x1.5 (the rest comes back)
-const ACK_VALUE: Int = ton("0.006");                // claim ack to the wallet: 5.9k gas = 0.0024 at 400/gas (+fwd), x2
+// v3 (audit R2-L2): the reward message values are GAS amounts, priced with the chain's current
+// config (getComputeFee / getForwardFee) at send time, so they follow a gas-price change. With fixed
+// Gram values an ack could arrive without enough gas above ~650 nanoGram/gas: `inFlight` then stuck.
+// Each side also REQUIRES its minimum (the master before it applies anything), so an underfunded
+// checkpoint / claim bounces and the wallet undoes it (unsend) instead of losing the ack.
+const CP_MASTER_GAS: Int = 46000;                   // master RewardCheckpoint: 28.2k gas measured (+ ~2k with a vault), x1.5
+const ACK_GAS: Int = 15000;                         // wallet RewardAck: 7.3k gas measured, x2
+const CLAIM_MASTER_GAS: Int = 50000;                // master RewardClaim: 31.2k gas measured (+ ~2k with a vault), x1.5
+const CLAIM_WALLET_GAS: Int = 16000;                // wallet ClaimRewards / SyncRewards: 10.3k gas measured, x1.5
+const DEX_REASON_LAUNCH_REFUND: Int = 17;          // dex/v2 constants.tact (v3)
+const DEX_REASON_LAUNCH_DEVBUY_REFUND: Int = 18;
+const DEX_REASON_LAUNCH_DONE: Int = 19;
 
 // --- tax split and buyback ---
 const TAX_IN_GAS: Int = ton("0.04");                // kept from a tax payout's value: split + auto-buyback 58k gas = 0.023 at 400/gas, x1.5 + fwd
@@ -59,6 +75,98 @@ const DEX_REASON_SWAP_REFUND: Int = 2;
 const DEX_REASON_PARTIAL_REFUND: Int = 10;
 const DEX_REASON_TAX: Int = 14;
 
+// Upper bound of the forward fee of one reward message (RewardCheckpoint / RewardClaim / RewardAck /
+// the payout comment): the body is one cell of < 1023 bits.
+fun rewardFwdFee(): Int {
+    return getForwardFee(1, 1023, false);
+}
+
+// Value of the claim ack (master -> wallet, forward fee paid separately): the wallet's compute.
+fun ackValue(): Int {
+    return getComputeFee(ACK_GAS, false);
+}
+
+// Value a wallet sends with a RewardCheckpoint (forward fee included): the master's compute, the ack's
+// compute and both forward fees. 0.0044 Gram at 66.7 nanoGram/gas (mainnet, 2026-11), 0.026 at 400.
+fun checkpointValue(): Int {
+    return getComputeFee(CP_MASTER_GAS, false) + ackValue() + 2 * rewardFwdFee();
+}
+
+// What the master requires of an arriving RewardCheckpoint (the wallet's forward fee is already paid).
+fun checkpointMin(): Int {
+    return getComputeFee(CP_MASTER_GAS, false) + ackValue() + rewardFwdFee();
+}
+
+// What the master requires of an arriving RewardClaim: its compute, the ack and two forward fees (ack, payout).
+fun claimMin(): Int {
+    return getComputeFee(CLAIM_MASTER_GAS, false) + ackValue() + 2 * rewardFwdFee();
+}
+
+// Minimum ClaimRewards value (the rest comes back with the rewards). 0.006 Gram at 66.7 nanoGram/gas, 0.035 at 400.
+fun claimValue(): Int {
+    return getComputeFee(CLAIM_WALLET_GAS, false) + claimMin() + rewardFwdFee();
+}
+
+// Minimum SyncRewards value.
+fun syncValue(): Int {
+    return getComputeFee(CLAIM_WALLET_GAS, false) + checkpointValue();
+}
+
+// Wallet / vault addresses as free functions: a contract method call passes the master's whole state
+// (50+ stack entries) in and out, which costs several thousand gas per call; the reward handlers run
+// on every transfer of a rewards token, so they use these directly.
+fun launchVaultOf(master: Address): Address {
+    return contractAddress(initOf LaunchVault(master));
+}
+
+// rewardsBps / vaultBps: the token's settings (they select rr and vault of the wallet init, see LaunchWallet).
+fun launchWalletOf(master: Address, owner: Address, router: Address, rewardsBps: Int, vaultBps: Int): Address {
+    let rr: Address? = rewardsBps > 0 ? router : null;
+    let vault: Address? = rewardsBps > 0 && vaultBps > 0 ? launchVaultOf(master) : null;
+    return contractAddress(initOf LaunchWallet(master, owner, rr, vault));
+}
+
+// Compute of the receiving wallet.
+fun walletRecvFee(): Int {
+    return getComputeFee(WALLET_RECV_GAS, false);
+}
+
+// Compute of both wallets of a transfer (or the wallet and the master of a burn) and the forward fee of
+// the internal transfer with the wallet StateInit.
+fun walletHopsFee(): Int {
+    return getComputeFee(WALLET_SEND_GAS, false) + walletRecvFee() + getForwardFee(WALLET_INIT_CELLS, WALLET_INIT_BITS, false);
+}
+
+// True only for a plain addr_std in workchain 0 (same check as dex/v2/contracts/constants.tact).
+fun isBasechain(a: Address): Bool {
+    let s = a.asSlice();
+    return s.bits() == 267 && s.refs() == 0 && s.preloadUint(11) == 1024;
+}
+
+// Address of the Marg DEX v2 Pool of `key`: contractAddress(initOf Pool(router, key)) computed from
+// the Pool code's hash and depth (the launchpad cannot import the DEX project). Tact init data =
+// a 0 bit (not yet initialized) + the init arguments. launch/tests check it against the Router's getter.
+fun dexPoolAddress(router: Address, key: PoolKey, codeHash: Int, codeDepth: Int): Address {
+    let data = beginCell()
+        .storeBool(false)
+        .storeAddress(router)
+        .storeAddress(key.token0)
+        .storeAddress(key.token1)
+        .storeUint(key.tickSpacing, 16)
+        .storeMaybeRef(key.ext)
+        .endCell();
+    // Representation hash of StateInit{code, data}: descriptors 0x02 (2 refs) 0x01 (5 data bits),
+    // the bits 00110 + completion tag = 0x34, both depths, both hashes.
+    let h = sha256(beginCell()
+        .storeUint(0x020134, 24)
+        .storeUint(codeDepth, 16)
+        .storeUint(data.depth(), 16)
+        .storeUint(codeHash, 256)
+        .storeUint(data.hash(), 256)
+        .endCell().asSlice());
+    return newAddress(0, h);
+}
+
 struct RewardsAcc {
     totalShares: Int as coins;
     acc: Int as uint256;
@@ -83,6 +191,14 @@ struct TaxAcc {
     walletPaid: Int as coins;
 }
 
+// v3 launch state.
+struct LaunchState {
+    pool: Address;                  // the token's own DEX pool (the only sender whose tax payouts / refunds count)
+    bbFrom: Int as uint32;          // no buyback before this time (0 = no anti-snipe fee)
+    feeEscrow: Int as coins;        // the launch fee, held until the launch is known to have succeeded or failed
+    settled: Bool;                  // the launch outcome is known (success: feeEscrow is paid to feeClaimer)
+}
+
 contract LaunchJetton {
     factory: Address;
     index: Int as uint64;
@@ -93,6 +209,7 @@ contract LaunchJetton {
     rw: RewardsAcc;
     bb: BuybackAcc;
     tax: TaxAcc;
+    ls: LaunchState;
 
     init(factory: Address, index: Int) {
         self.factory = factory;
@@ -109,6 +226,7 @@ contract LaunchJetton {
         self.rw = RewardsAcc { totalShares: 0, acc: 0, rem: 0, accrued: 0, claimed: 0, carry: 0 };
         self.bb = BuybackAcc { bal: 0, spent: 0, burned: 0, count: 0, last: 0, harvestLast: 0, inTotal: 0 };
         self.tax = TaxAcc { taxIn: 0, walletPaid: 0 };
+        self.ls = LaunchState { pool: factory, bbFrom: 0, feeEscrow: 0, settled: false };
     }
 
     // The one and only mint. It goes to the Router's wallet with the launch payload; the Router
@@ -122,6 +240,14 @@ contract LaunchJetton {
         self.info = msg.info;
         self.totalSupply = TOTAL_SUPPLY;
         let i = msg.info;
+        // The pool must be initialized by now() + LAUNCH_DEADLINE (the Pool refuses a later launch), so its
+        // launch-fee window has fully ended at bbFrom at the latest (audit R2-L6); settle() tightens it.
+        self.ls = LaunchState {
+            pool: dexPoolAddress(i.router, self.poolKey(), msg.poolCodeHash, msg.poolCodeDepth),
+            bbFrom: i.launchFeePips > 0 ? now() + LAUNCH_DEADLINE + i.launchDuration : 0,
+            feeEscrow: msg.launchFee,
+            settled: false,
+        };
         let payload = LaunchPayload {
             sqrtPriceX96: i.sqrtPriceX96,
             tickSpacing: i.tickSpacing,
@@ -176,7 +302,7 @@ contract LaunchJetton {
                 }.toCell(),
             });
         }
-        nativeReserve(MASTER_MIN_STORAGE, ReserveAtMost);
+        nativeReserve(MASTER_MIN_STORAGE + msg.launchFee, ReserveAtMost);
         deploy(DeployParameters {
             init: initOf LaunchWallet(myAddress(), i.router, self.rewardsRouter(), self.untrackedVault()),
             value: 0,
@@ -219,9 +345,8 @@ contract LaunchJetton {
     receive(msg: ProvideWalletAddress) {
         require(context().value >= ton("0.0061"), "Insufficient TON attached");
         let ownerCell: Cell? = msg.includeAddress ? beginCell().storeAddress(msg.ownerAddress).endCell() : null;
-        let walletAddress = parseStdAddress(msg.ownerAddress.asSlice()).workchain == 0
-            ? self.walletOf(msg.ownerAddress)
-            : newAddress(0, 0);
+        // TEP-89: addr_none (null) when the owner cannot have a wallet of this jetton (not basechain).
+        let walletAddress: Address? = isBasechain(msg.ownerAddress) ? self.walletOf(msg.ownerAddress) : null;
         message(MessageParameters {
             to: sender(),
             value: 0,
@@ -234,6 +359,7 @@ contract LaunchJetton {
     // The launch mint bounced (it cannot in practice): no supply exists, minting stays closed.
     bounced(msg: bounced<JettonTransferInternal>) {
         self.totalSupply -= msg.amount;
+        self.settle(false);
         self.forwardToCreator();
     }
 
@@ -259,15 +385,28 @@ contract LaunchJetton {
     // Tax payouts and Gram returns
     // -----------------------------------------------------------------------
 
+    // Only the token's own pool is believed (audit L-4): its TAX payouts run the split, its refunds of
+    // the master's own swaps reduce `spent`. A GramPayout from anyone else moves no counter: its Gram
+    // is a donation (to the bucket with an own-query id, else forwarded to the creator).
     receive(msg: GramPayout) {
         let ctx = context();
-        if (msg.reason == DEX_REASON_TAX && self.taxed()) {
+        let fromPool = self.launched && ctx.sender == self.ls.pool;
+        if (fromPool && !self.ls.settled) {
+            // v3 (audit V3-M1): only the reasons the Pool uses for this master's own PoolLaunch count;
+            // anyone can make the pool refund an ordinary mint or swap to this master before it opens.
+            if (msg.reason == DEX_REASON_LAUNCH_REFUND) {
+                self.settle(false);                 // the Pool refused the launch (the dev buy's Gram comes back)
+            } else if (msg.reason == DEX_REASON_LAUNCH_DONE || msg.reason == DEX_REASON_LAUNCH_DEVBUY_REFUND || msg.reason == DEX_REASON_TAX) {
+                self.settle(true);                  // launched (no dev buy, or it could not fill), or a tax payout
+            }
+        }
+        if (fromPool && msg.reason == DEX_REASON_TAX && self.taxed()) {
             self.taxIn(ctx.value, msg.amount);
             return;
         }
         if (self.ownQuery(msg.queryId)) {
             // A refunded buyback (slippage, deadline, ...): its Gram returns to the bucket.
-            if (msg.reason == DEX_REASON_SWAP_REFUND || msg.reason == DEX_REASON_PARTIAL_REFUND) {
+            if (fromPool && (msg.reason == DEX_REASON_SWAP_REFUND || msg.reason == DEX_REASON_PARTIAL_REFUND)) {
                 self.bb.spent -= min(msg.amount, self.bb.spent);
             }
             self.credit(ctx.value);
@@ -278,7 +417,24 @@ contract LaunchJetton {
 
     // Excess of the master's own DEX requests (buyback swap chain, harvest with no tax) returns to
     // the bucket. Any other excess (the launch chain) goes to the creator, as before.
+    //
+    // Launch outcome (the launch fee is held here until it is known): the supply coming back to this
+    // master's own wallet (a refused launch: the Router / Pool refund has responseDestination = this
+    // master) is a failure; the excess of the dev buy's payout to the creator is a success (the pool's own
+    // reports are GramPayout reasons 17/18/19). Before the pool is initialized nobody else holds tokens,
+    // so neither can be faked.
     receive(msg: JettonExcesses) {
+        if (self.launched && !self.ls.settled) {
+            let s = sender();
+            let me = myAddress();
+            // v3 (V3-M1): the pool's plain excess is not an outcome (anyone can address one here); the
+            // pool reports a launch with GramPayout reasons 17/18/19 instead.
+            if (s == launchWalletOf(me, me, self.info.router, self.info.rewardsBps, self.info.vaultBps)) {
+                self.settle(false);
+            } else if (s == launchWalletOf(me, self.info.creator, self.info.router, self.info.rewardsBps, self.info.vaultBps)) {
+                self.settle(true);
+            }
+        }
         if (self.ownQuery(msg.queryId)) {
             self.credit(context().value);
             return;
@@ -349,8 +505,13 @@ contract LaunchJetton {
     // -----------------------------------------------------------------------
 
     receive(msg: RewardCheckpoint) {
-        require(self.rewardsOn() && sender() == self.walletOf(msg.owner), "Invalid wallet");
-        self.applyDelta(msg.delta);
+        // Underfunded (the gas price rose in flight): bounce before anything is applied; the wallet undoes it.
+        require(context().value >= checkpointMin(), "Insufficient TON attached");
+        require(self.launched && self.info.rewardsBps > 0 &&
+            sender() == launchWalletOf(myAddress(), msg.owner, self.info.router, self.info.rewardsBps, self.info.vaultBps), "Invalid wallet");
+        let t = self.rw.totalShares + msg.delta;
+        require(t >= 0, "Negative shares");
+        self.rw.totalShares = t;
         message(MessageParameters {
             to: sender(),
             value: 0,
@@ -361,16 +522,20 @@ contract LaunchJetton {
     }
 
     receive(msg: RewardClaim) {
-        require(self.rewardsOn() && sender() == self.walletOf(msg.owner), "Invalid wallet");
+        require(context().value >= claimMin(), "Insufficient TON attached");
+        require(self.launched && self.info.rewardsBps > 0 &&
+            sender() == launchWalletOf(myAddress(), msg.owner, self.info.router, self.info.rewardsBps, self.info.vaultBps), "Invalid wallet");
         let x = msg.acked * (self.rw.acc - msg.lastAcc) + msg.frac;
         let pay = msg.owed + x / REWARD_SCALE;
         require(self.rw.claimed + pay <= self.rw.accrued, "Rewards insolvent");
         self.rw.claimed += pay;
-        self.applyDelta(msg.delta);
+        let t = self.rw.totalShares + msg.delta;
+        require(t >= 0, "Negative shares");
+        self.rw.totalShares = t;
         // The wallet gets a small ack; the owner gets the rewards plus the rest of the claim's value.
         message(MessageParameters {
             to: sender(),
-            value: ACK_VALUE,
+            value: ackValue(),
             mode: SendPayGasSeparately,
             bounce: false,
             body: RewardAck { queryId: msg.queryId, acc: self.rw.acc, delta: msg.delta, claim: true, frac: x % REWARD_SCALE }.toCell(),
@@ -400,10 +565,6 @@ contract LaunchJetton {
         return self.launched && self.info.taxRecipient != null;
     }
 
-    fun rewardsOn(): Bool {
-        return self.launched && self.info.rewardsBps > 0;
-    }
-
     fun buybackOn(): Bool {
         return self.launched && self.info.buybackBps > 0;
     }
@@ -419,20 +580,40 @@ contract LaunchJetton {
     }
 
     fun vaultAddress(): Address {
-        return contractAddress(initOf LaunchVault(myAddress()));
+        return launchVaultOf(myAddress());
     }
 
     fun walletOf(owner: Address): Address {
-        return contractAddress(initOf LaunchWallet(myAddress(), owner, self.rewardsRouter(), self.untrackedVault()));
+        return launchWalletOf(myAddress(), owner, self.info.router, self.info.rewardsBps, self.info.vaultBps);
+    }
+
+    fun tagged(queryId: Int): Bool {
+        return (queryId >> 32) == BB_TAG;
     }
 
     fun ownQuery(queryId: Int): Bool {
-        return self.buybackOn() && (queryId >> 32) == BB_TAG;
+        return self.buybackOn() && self.tagged(queryId);
     }
 
-    // Gram that belongs to holders (unclaimed rewards) and to the buyback bucket.
+    // Gram that belongs to holders (unclaimed rewards), to the buyback bucket and the launch-fee escrow.
     fun held(): Int {
-        return self.rw.accrued + self.rw.carry - self.rw.claimed + self.bb.bal;
+        return self.rw.accrued + self.rw.carry - self.rw.claimed + self.bb.bal + self.ls.feeEscrow;
+    }
+
+    // The launch outcome, once. Success: the fee stays reserved until forwardToCreator() pays it to
+    // feeClaimer, and the buyback may start launchDuration from now (the pool was initialized before
+    // this message was sent). Failure: the fee is released, so forwardToCreator() returns it to the
+    // creator with the rest of the refund.
+    fun settle(ok: Bool) {
+        if (self.ls.settled) {
+            return;
+        }
+        self.ls.settled = true;
+        if (!ok) {
+            self.ls.feeEscrow = 0;
+        } else if (self.ls.bbFrom > 0) {
+            self.ls.bbFrom = min(self.ls.bbFrom, now() + self.info.launchDuration);
+        }
     }
 
     fun credit(value: Int) {
@@ -504,12 +685,6 @@ contract LaunchJetton {
         self.rw.accrued += amt;
     }
 
-    fun applyDelta(delta: Int) {
-        let t = self.rw.totalShares + delta;
-        require(t >= 0, "Negative shares");
-        self.rw.totalShares = t;
-    }
-
     // Gram the next buyback would swap (0 = not enough in the bucket).
     fun nextBuyback(): Int {
         let cap = self.info.buybackCap;
@@ -523,9 +698,10 @@ contract LaunchJetton {
     }
 
     // While the pool's LAUNCH_DECAY fee (up to 90%) is in force a buyback would mostly pay that fee:
-    // no buyback runs before createdAt + launchDuration (the bucket keeps filling meanwhile).
+    // no buyback runs before bbFrom, which is never earlier than the pool's own window end (pool
+    // initialization time + launchDuration); the bucket keeps filling meanwhile.
     fun antiSnipeActive(): Bool {
-        return self.info.launchFeePips > 0 && now() < self.info.createdAt + self.info.launchDuration;
+        return now() < self.ls.bbFrom;
     }
 
     // Price guard hook. Today: 0 (the guards are the cap of 1% of the start market cap, which is
@@ -602,6 +778,22 @@ contract LaunchJetton {
         if (!self.launched) {
             return;
         }
+        // No outcome message within twice the launch deadline: a refused launch always reports back
+        // (its refund carries the whole value), so the launch succeeded.
+        if (!self.ls.settled && now() > self.info.createdAt + 2 * LAUNCH_DEADLINE) {
+            self.settle(true);
+        }
+        if (self.ls.settled && self.ls.feeEscrow > 0) {
+            let fee = self.ls.feeEscrow;
+            self.ls.feeEscrow = 0;
+            message(MessageParameters {
+                to: self.info.feeClaimer,
+                value: fee,
+                mode: SendPayGasSeparately | SendIgnoreErrors,
+                bounce: false,
+                body: "Launch fee".asComment(),
+            });
+        }
         nativeReserve(MASTER_MIN_STORAGE + self.held(), ReserveAtMost);
         message(MessageParameters {
             to: self.info.creator,
@@ -654,6 +846,22 @@ contract LaunchJetton {
         return self.vaultAddress();
     }
 
+    // v3: the token's DEX pool address as the master computed it (= Router.get_pool_address of get_pool_key).
+    get fun get_pool_address(): Address {
+        return self.ls.pool;
+    }
+
+    // v3: launch-fee escrow (0 once paid to feeClaimer or returned to the creator), whether the launch
+    // outcome is known, and the earliest buyback time (0 = no anti-snipe fee).
+    get fun get_launch_state(): LaunchState {
+        return self.ls;
+    }
+
+    // v3: current Gram values of the reward messages (they follow the gas price).
+    get fun get_reward_values(): RewardValues {
+        return RewardValues { checkpoint: checkpointValue(), claim: claimValue(), sync: syncValue(), ack: ackValue() };
+    }
+
     get fun get_index(): Int {
         return self.index;
     }
@@ -694,7 +902,7 @@ contract LaunchJetton {
     }
 
     get fun get_buyback_status(): BuybackStatus {
-        let next = self.bb.count == 0 ? 0 : self.bb.last + BUYBACK_INTERVAL;
+        let next = self.bb.count == 0 ? self.ls.bbFrom : self.bb.last + BUYBACK_INTERVAL;
         let nextHarvest = self.bb.harvestLast + HARVEST_INTERVAL;
         return BuybackStatus {
             balance: self.bb.bal,
@@ -764,13 +972,15 @@ contract LaunchWallet {
         // A tracked sender pays its own checkpoint and the receiver's (when the receiver is tracked).
         // Untracked senders (the Router's wallet) keep the plain TEP-74 requirement.
         let cp = 0;
+        let cpv = 0;
         if (self.rs != null) {
-            cp = CHECKPOINT_VALUE + fwdFee;
+            cpv = checkpointValue();
+            cp = cpv + fwdFee;
             if (self.tracks(msg.destination)) {
-                cp += CHECKPOINT_VALUE + fwdFee;
+                cp += cpv + fwdFee;
             }
         }
-        require(ctx.value > msg.forwardTonAmount + fwdCount * fwdFee + 2 * WALLET_GAS + WALLET_MIN_STORAGE + cp,
+        require(ctx.value > msg.forwardTonAmount + fwdCount * fwdFee + walletHopsFee() + WALLET_MIN_STORAGE + cp,
             "Insufficient TON attached");
 
         self.balance -= msg.amount;
@@ -789,7 +999,7 @@ contract LaunchWallet {
         }
         // Checkpoint first (same transaction as the balance change), then the transfer carries
         // the rest of the value; Gram above the storage buffer (earlier ack leftovers) goes along.
-        self.checkpoint(msg.queryId, CHECKPOINT_VALUE, SendDefaultMode);
+        self.checkpoint(msg.queryId, cpv, SendDefaultMode);
         nativeReserve(min(myBalance() - ctx.value, WALLET_MIN_STORAGE), ReserveAtMost);
         deploy(DeployParameters { init, value: 0, mode: SendRemainingBalance, bounce: true, body });
     }
@@ -821,9 +1031,11 @@ contract LaunchWallet {
         }
         // Best effort: when the incoming value cannot pay the checkpoint, the wallet stays
         // under-reported (it earns on less than it holds) until its next checkpoint or SyncRewards.
-        if (self.rs != null &&
-            ctx.value >= msg.forwardTonAmount + CHECKPOINT_VALUE + WALLET_MIN_STORAGE + WALLET_GAS) {
-            self.checkpoint(msg.queryId, CHECKPOINT_VALUE, SendDefaultMode);
+        if (self.rs != null) {
+            let cpv = checkpointValue();
+            if (ctx.value >= msg.forwardTonAmount + cpv + WALLET_MIN_STORAGE + walletRecvFee()) {
+                self.checkpoint(msg.queryId, cpv, SendDefaultMode);
+            }
         }
         if (msg.responseDestination != null) {
             message(MessageParameters {
@@ -842,8 +1054,9 @@ contract LaunchWallet {
         require(msg.amount > 0, "Invalid amount");
         require(self.balance >= msg.amount, "Insufficient balance");
         let fwdFee = ctx.readForwardFee();
-        let cp = self.rs != null ? CHECKPOINT_VALUE + fwdFee : 0;
-        require(ctx.value > fwdFee * 2 + 2 * WALLET_GAS + cp, "Insufficient TON attached");
+        let cpv = self.rs != null ? checkpointValue() : 0;
+        let cp = self.rs != null ? cpv + fwdFee : 0;
+        require(ctx.value > fwdFee * 2 + walletHopsFee() + cp, "Insufficient TON attached");
 
         self.balance -= msg.amount;
         let body = JettonBurnNotification {
@@ -856,7 +1069,7 @@ contract LaunchWallet {
             message(MessageParameters { to: self.master, value: 0, mode: SendRemainingValue, bounce: true, body });
             return;
         }
-        self.checkpoint(msg.queryId, CHECKPOINT_VALUE, SendDefaultMode);
+        self.checkpoint(msg.queryId, cpv, SendDefaultMode);
         nativeReserve(min(myBalance() - ctx.value, WALLET_MIN_STORAGE), ReserveAtMost);
         message(MessageParameters { to: self.master, value: 0, mode: SendRemainingBalance, bounce: true, body });
     }
@@ -869,7 +1082,7 @@ contract LaunchWallet {
         require(self.rs != null, "No rewards");
         let rs = self.rs!!;
         require(rs.inFlight == 0, "Checkpoint in flight");
-        require(ctx.value >= CLAIM_VALUE, "Insufficient TON attached");
+        require(ctx.value >= claimValue(), "Insufficient TON attached");
         let delta = self.balance - rs.synced;
         rs.synced = self.balance;
         rs.inFlight = 1;
@@ -890,7 +1103,7 @@ contract LaunchWallet {
         let ctx = context();
         require(ctx.sender == self.owner, "Not owner");
         require(self.rs != null, "No rewards");
-        require(ctx.value >= CHECKPOINT_VALUE, "Insufficient TON attached");
+        require(ctx.value >= syncValue(), "Insufficient TON attached");
         self.checkpoint(msg.queryId, 0, SendRemainingValue);
     }
 
@@ -984,5 +1197,23 @@ contract LaunchWallet {
 
     get fun get_tracked(): Bool {
         return self.rs != null;
+    }
+
+    // v3: what a JettonTransfer to `destination` must carry on top of forwardTonAmount and the forward
+    // fees of its payload (1 or 2 x the incoming message's forward fee): wallet compute, the wallet
+    // StateInit forward fee, the new wallet's storage and, for a rewards token, the checkpoints (the
+    // sender's and, when the destination is tracked, the receiver's). Priced at the current gas price.
+    get fun get_transfer_fee(destination: Address): Int {
+        let cp = 0;
+        if (self.rs != null) {
+            cp = checkpointValue() * (self.tracks(destination) ? 2 : 1);
+        }
+        return walletHopsFee() + WALLET_MIN_STORAGE + cp;
+    }
+
+    // v3: current Gram values of the reward messages (they follow the gas price): what a transfer adds
+    // per checkpoint, and the ClaimRewards / SyncRewards minimums.
+    get fun get_reward_values(): RewardValues {
+        return RewardValues { checkpoint: checkpointValue(), claim: claimValue(), sync: syncValue(), ack: ackValue() };
     }
 }

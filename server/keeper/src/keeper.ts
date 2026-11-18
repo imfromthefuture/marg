@@ -30,6 +30,9 @@ const MAX_HARVEST_VALUE = toNano(process.env.KEEPER_MAX_HARVEST_VALUE ?? '0.5');
 // Launches are permissionless, so wash-traded tokens could make the keeper spend all day: cap the
 // Gram it attaches per rolling 24 h, and act on each token at most once per KEEPER_TOKEN_COOLDOWN_SEC.
 const MAX_SPEND_DAY = toNano(process.env.KEEPER_MAX_SPEND_PER_DAY ?? '3');
+// A caller-paid harvest costs the keeper real Gram; only pay it when the tax it moves is worth
+// many times that (audit R2-L4: an attacker's own small-tax launches could drain the budget).
+const HARVEST_MIN_MULTIPLE = BigInt(process.env.KEEPER_HARVEST_MIN_MULTIPLE ?? 10);
 const TOKEN_COOLDOWN = Number(process.env.KEEPER_TOKEN_COOLDOWN_SEC ?? 3600) * 1000;
 const spends: { at: number; value: bigint }[] = [];
 const lastActed = new Map<string, number>();
@@ -119,7 +122,7 @@ async function readPoolState(address: Address) {
     return loadGetterTuplePoolState(new TupleReader([...items, ...Array.from({ length: 4 }, (): TupleItem => ({ type: 'int', value: 0n }))]));
 }
 
-type Action = { kind: 'harvest' | 'buyback'; master: Address; symbol: string; value: bigint; note: string };
+type Action = { kind: 'harvest' | 'buyback'; master: Address; symbol: string; value: bigint; note: string; weight: bigint };
 
 async function plan(t: any): Promise<Action | null> {
     if (!t.pool || t.placeholder) return null;
@@ -138,16 +141,17 @@ async function plan(t: any): Promise<Action | null> {
     const st = await buybackStatus(master, hv !== null);
     const tax = `tax=${fromNano(ps.taxFees)} bucket=${fromNano(st.balance)}`;
     if (ps.taxFees >= MIN_TAX) {
-        if (st.harvestDue) return { kind: 'harvest', master, symbol, value: GAS_VALUE, note: `${tax} bucket-paid` };
+        if (st.harvestDue) return { kind: 'harvest', master, symbol, value: GAS_VALUE, note: `${tax} bucket-paid`, weight: ps.taxFees };
         if (hv !== null && st.nextCallerHarvestAt !== null && now() >= st.nextCallerHarvestAt) {
             if (hv > MAX_HARVEST_VALUE) {
                 console.warn(`skip ${symbol}: harvest value ${fromNano(hv)} above KEEPER_MAX_HARVEST_VALUE`);
                 return null;
             }
-            return { kind: 'harvest', master, symbol, value: hv, note: `${tax} caller-paid` };
+            if (ps.taxFees < hv * HARVEST_MIN_MULTIPLE) return null;
+            return { kind: 'harvest', master, symbol, value: hv, note: `${tax} caller-paid`, weight: ps.taxFees };
         }
     }
-    if (st.wouldRun) return { kind: 'buyback', master, symbol, value: GAS_VALUE, note: tax };
+    if (st.wouldRun) return { kind: 'buyback', master, symbol, value: GAS_VALUE, note: tax, weight: st.balance };
     return null;
 }
 
@@ -163,21 +167,24 @@ async function run(secretKey: Buffer, publicKey: Buffer) {
     const tokens = (await res.json()) as any[];
     if (!Array.isArray(tokens)) throw new Error('indexer: not a list');
     let sent = 0;
+    // Plan every token first, then act on the largest amounts first (audit R2-L4): many small
+    // launches can no longer use up the run's MAX_TX or the daily budget ahead of real ones.
+    const actions: Action[] = [];
     for (const t of tokens.filter((x) => x?.kind === 'dex')) {
+        try {
+            const a = await plan(t);
+            if (a && Date.now() - (lastActed.get(a.master.toRawString()) ?? 0) >= TOKEN_COOLDOWN) actions.push(a);
+        } catch (e) {
+            console.error(`check ${t?.symbol} ${t?.address}: ${errText(e)}`);
+        }
+    }
+    actions.sort((x, y) => (y.weight > x.weight ? 1 : y.weight < x.weight ? -1 : 0));
+    for (const a of actions) {
         if (sent >= MAX_TX) {
             console.log(`max ${MAX_TX} tx per run reached`);
             break;
         }
-        let a: Action | null;
-        try {
-            a = await plan(t);
-        } catch (e) {
-            console.error(`check ${t?.symbol} ${t?.address}: ${errText(e)}`);
-            continue;
-        }
-        if (!a) continue;
         const mk = a.master.toRawString();
-        if (Date.now() - (lastActed.get(mk) ?? 0) < TOKEN_COOLDOWN) continue;
         if (spentToday() + a.value > MAX_SPEND_DAY) {
             console.warn(`daily budget ${fromNano(MAX_SPEND_DAY)} reached (spent ${fromNano(spentToday())}): stopping`);
             break;
@@ -197,9 +204,12 @@ async function run(secretKey: Buffer, publicKey: Buffer) {
         console.log(`${ok ? 'sent' : 'NOT CONFIRMED'} ${line}`);
         if (!ok) break; // seqno did not move: do not stack more sends on it
         sent++;
-        spends.push({ at: Date.now(), value: a.value });
         lastActed.set(mk, Date.now());
-        balance = await call(() => wallet.getBalance());
+        // Count what the call really cost (refunded calls cost only gas), once the refund is in.
+        await sleep(8000);
+        const after = await call(() => wallet.getBalance());
+        spends.push({ at: Date.now(), value: balance > after ? balance - after : 0n });
+        balance = after;
     }
     console.log(`run done: ${sent} tx, wallet ${fromNano(balance)}`);
 }

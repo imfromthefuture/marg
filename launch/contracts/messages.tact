@@ -56,7 +56,7 @@ message(0x2c76b973) ProvideWalletAddress {
 
 message(0xd1735400) TakeWalletAddress {
     queryId: Int as uint64;
-    walletAddress: Address;
+    walletAddress: Address?;        // null = addr_none (TEP-89: the owner cannot have a wallet)
     ownerAddress: Cell?;
 }
 
@@ -130,13 +130,28 @@ struct LaunchInfo {
 }
 
 // Factory -> new master (once).
+// (queryId and index come first, followed by a coins field, so that a bounced LaunchSetup carries exactly
+// those two: a bounce body is 224 bits after the opcode and has no refs.)
 message(0x4d4c0002) LaunchSetup {
     queryId: Int as uint64;
+    index: Int as uint64;
+    launchFee: Int as coins;        // v3: held by the master until the launch outcome is known
     content: Cell;
     info: LaunchInfo;
     devBuy: Int as coins;
     minDevOut: Int as coins;
     routerValue: Int as coins;      // forwardTonAmount for the Router (gas + devBuy)
+    poolCodeHash: Int as uint256;   // v3: the DEX Pool code (hash, depth): the master derives its pool address
+    poolCodeDepth: Int as uint16;
+}
+
+// Factory -> external (event): a LaunchSetup bounced (the master could not run it); the whole value was
+// returned to the creator when the factory still knew it (the last FACTORY_PENDING launches).
+message(0x4d4c0025) LaunchBounced {
+    queryId: Int as uint64;
+    index: Int as uint64;
+    creator: Address?;
+    value: Int as coins;
 }
 
 // Admin -> Factory
@@ -182,6 +197,11 @@ struct LaunchTiers {
     low: LaunchParams;
     mid: LaunchParams;
     high: LaunchParams;
+}
+
+struct PoolCode {
+    hash: Int;
+    depth: Int;
 }
 
 struct FactoryData {
@@ -338,6 +358,14 @@ struct RewardState {
     frac: Int as uint64;            // sub-nanoGram remainder, scaled by REWARD_SCALE
     owed: Int as coins;             // unclaimed rewards up to lastAcc, nanoGram
     inFlight: Int as uint32;        // checkpoints/claims sent and not yet acked or bounced
+}
+
+// Current Gram values of the reward messages (gas amounts priced with the chain config).
+struct RewardValues {
+    checkpoint: Int;                // sent with every RewardCheckpoint (a tracked transfer needs 1 or 2 on top)
+    claim: Int;                     // minimum ClaimRewards value
+    sync: Int;                      // minimum SyncRewards value
+    ack: Int;                       // claim ack (master -> wallet)
 }
 
 struct RewardsData {

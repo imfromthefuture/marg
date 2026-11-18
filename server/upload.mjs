@@ -13,7 +13,10 @@ const MAX_BYTES = 5 * 1024 * 1024;
 // Total size of the upload folder; new files are refused above it (default 2 GB).
 const DISK_QUOTA = Number(process.env.UPLOAD_QUOTA_BYTES ?? 2 * 1024 ** 3);
 // New bytes stored per client IP per UTC day (default 50 MB). Duplicates of stored files are free.
-const IP_DAILY_BYTES = Number(process.env.UPLOAD_IP_DAILY_BYTES ?? 50 * 1024 ** 2);
+const IP_DAILY_BYTES = Number(process.env.UPLOAD_IP_DAILY_BYTES ?? 20 * 1024 ** 2);
+// New bytes stored per UTC day by everyone together (default 150 MB): many IPs together can no
+// longer fill DISK_QUOTA in one day (audit R2-L5); it would take two weeks and is visible.
+const ALL_DAILY_BYTES = Number(process.env.UPLOAD_ALL_DAILY_BYTES ?? 150 * 1024 ** 2);
 
 // Folder usage, read once at start and kept up to date on each write.
 let used = 0;
@@ -28,9 +31,10 @@ try {
 // Per-IP bytes for the current UTC day (reset at midnight; in memory, so a restart resets it too).
 let day = '';
 const perIp = new Map();
+let allToday = 0;
 function ipUsage(ip) {
     const today = new Date().toISOString().slice(0, 10);
-    if (today !== day) { day = today; perIp.clear(); }
+    if (today !== day) { day = today; perIp.clear(); allToday = 0; }
     return perIp.get(ip) ?? 0;
 }
 // nginx sets X-Real-IP to $remote_addr; the service only listens on 127.0.0.1.
@@ -61,6 +65,7 @@ const server = http.createServer((req, res) => {
     const ip = clientIp(req);
     if (used >= DISK_QUOTA) return reply(res, 507, { error: 'Upload storage is full, try again later' });
     if (ipUsage(ip) + Math.max(declared, 0) > IP_DAILY_BYTES) return reply(res, 429, { error: 'Daily upload limit reached' });
+    if (allToday + Math.max(declared, 0) > ALL_DAILY_BYTES) return reply(res, 429, { error: 'Uploads are paused for today, try again tomorrow' });
 
     const chunks = [];
     let size = 0;
@@ -87,10 +92,12 @@ const server = http.createServer((req, res) => {
             if (!existsSync(path)) {
                 if (used + buf.length > DISK_QUOTA) return reply(res, 507, { error: 'Upload storage is full, try again later' });
                 if (ipUsage(ip) + buf.length > IP_DAILY_BYTES) return reply(res, 429, { error: 'Daily upload limit reached' });
+                if (allToday + buf.length > ALL_DAILY_BYTES) return reply(res, 429, { error: 'Uploads are paused for today, try again tomorrow' });
                 writeFileSync(path + '.tmp', buf, { mode: 0o644 });
                 renameSync(path + '.tmp', path);
                 used += buf.length;
                 perIp.set(ip, ipUsage(ip) + buf.length);
+                allToday += buf.length;
             }
         } catch (e) {
             console.error('write failed', e);

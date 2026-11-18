@@ -68,6 +68,11 @@ const STOP_LIMIT: Int = 1;
 const STOP_CROSSINGS: Int = 2;
 const STOP_STEPS: Int = 3;
 const STOP_NO_LIQUIDITY: Int = 4;
+const STOP_GAS: Int = 5;               // v3: the swap loop reached SWAP_GAS_STOP
+// v3 (audit R2-H1): the swap loop stops once the transaction has used this much gas (at most;
+// see swapGasStop), which leaves room for the commit, payouts and state write below TON's
+// 1,000,000 gas limit per transaction.
+const SWAP_GAS_STOP: Int = 650000;
 
 // --- storage buffers ---
 const ROUTER_MIN_STORAGE: Int = ton("0.05");
@@ -131,6 +136,12 @@ const REASON_HOOK_FEE: Int = 12;
 const REASON_MINT_REFUND: Int = 13;
 const REASON_TAX: Int = 14;
 const REASON_PLATFORM: Int = 15;
+const REASON_SURPLUS: Int = 16;     // v3: SweepPoolSurplus payout to the treasury
+// v3 (audit V3-M1): refunds that only PoolLaunch sends (only the key's initializer can cause one),
+// so the launch master can tell its launch outcome from refunds anyone can trigger.
+const REASON_LAUNCH_REFUND: Int = 17;        // PoolLaunch refused: deposit (and dev buy) returned
+const REASON_LAUNCH_DEVBUY_REFUND: Int = 18; // launch done, the dev buy could not fill: its Gram returned
+const REASON_LAUNCH_DONE: Int = 19;          // launch done without a dev buy: the remaining value (amount 0)
 
 // --- refund codes (RefundEvent.code, PositionSync.code, Quote.code) ---
 const CODE_DEADLINE: Int = 201;

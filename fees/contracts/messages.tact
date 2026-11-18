@@ -45,6 +45,18 @@ message(0x4d460009) ApproveConvertKey {
     approved: Bool;
 }
 
+// Keeper or admin: claim the holder rewards of a Marg launch token that the converter's wallet
+// `jettonWallet` earned (the wallet gets ClaimRewards; the Gram arrives here and is forwarded).
+message(0x4d46000a) ClaimJettonRewards {
+    queryId: Int as uint64;
+    jettonWallet: Address;
+}
+
+// Copy of launch/contracts/messages.tact ClaimRewards (owner -> own LaunchWallet).
+message(0x4d4c0033) LaunchClaimRewards {
+    queryId: Int as uint64;
+}
+
 message(0x4d460005) SetKeeper {
     queryId: Int as uint64;
     keeper: Address?;               // null: only the admin converts

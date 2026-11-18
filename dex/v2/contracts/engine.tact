@@ -25,6 +25,7 @@ struct SwapIn {
     limit: Int;             // resolved, strictly beyond the current price
     maxCrossings: Int;
     t: Int;
+    gasStop: Int;           // v3: stop the loop once gasConsumed() exceeds this (swapGasStop)
 }
 
 struct SwapRes {
@@ -112,6 +113,16 @@ struct TickUpdate {
 // Swap
 // ---------------------------------------------------------------------------
 
+// v3 (audit R2-H1): gas the swap loop may use. The Router makes every swap attach
+// SWAP_BASE_GAS + maxCrossings * CROSS_GAS for compute (sized at 1.5x the measured cost of an
+// ordinary swap); the loop stops at two thirds of what that buys at today's gas price, and never
+// above SWAP_GAS_STOP. So the swap always finishes, its payouts stay funded, and an adversarial
+// tick layout only ends it early (partial fill or refund), never out of gas.
+fun swapGasStop(maxCrossings: Int): Int {
+    let budget = SWAP_BASE_GAS + maxCrossings * CROSS_GAS;
+    return min(SWAP_GAS_STOP, budget * 1000000 / getComputeFee(1000000, false) * 2 / 3);
+}
+
 fun computeSwap(s: SwapIn): SwapRes {
     let spacing = s.spacing;
     let zfo = s.zeroForOne;
@@ -151,9 +162,18 @@ fun computeSwap(s: SwapIn): SwapRes {
 
     let nextInit: Int? = zfo ? tickPrevLe(tick, ticks, 24) : tickNextGt(tick, ticks, 24);
 
+    let startIdx = tick / spacing;
+    let fresh = max(0, s.t - s.fs.lastTs) >= s.fs.filterPeriod;
+
     while (!done && rem > 0 && sqrtP != lim) {
         if (steps == MAX_STEPS) {
             stop = STOP_STEPS;
+            done = true;
+        } else if (steps > 0 && gasConsumed() > s.gasStop) {
+            // v3 (audit R2-H1): a swap must never run out of the 1M per-transaction gas limit.
+            // Router -> Pool is non-bounceable, so an out-of-gas abort would strand the input.
+            // Whatever the tick layout, stop here and let the normal partial / refund path run.
+            stop = STOP_GAS;
             done = true;
         } else if (nextInit == null && liq == 0) {
             // Never walk an empty book to the extremes.
@@ -245,7 +265,12 @@ fun computeSwap(s: SwapIn): SwapRes {
         va = min(maxVa, volRef + abs(idxRef - tick / spacing) * VA_UNIT);
     }
     fs.volAcc = va;
-    fs.lastTs = s.t;
+    // v3 (audit R2-L1): only a swap that refreshed the references or moved the active index
+    // restarts the filter period. Dust swaps that move nothing can no longer keep a stale,
+    // high reference alive forever (pinning the variable fee at its maximum).
+    if (fresh || tick / spacing != startIdx) {
+        fs.lastTs = s.t;
+    }
     return SwapRes {
         out, remaining: rem, feeTotal, proto, hook,
         sqrtP, tick, liquidity: liq, fg0, fg1, ticks, fs,

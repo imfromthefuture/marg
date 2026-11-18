@@ -15,6 +15,8 @@ contract Router {
     platformBps: Int as uint16;                 // PLATFORM FEE of launch keys, admin-set in [0, PLATFORM_FEE_CAP_BPS]
 
     init(admin: Address, treasury: Address) {
+        // v3 (audit M-2): a treasury outside basechain fails every platform payout.
+        require(isBasechain(treasury), "Invalid recipient");
         self.admin = admin;
         self.pendingAdmin = null;
         self.treasury = treasury;
@@ -298,36 +300,24 @@ contract Router {
     // TAX plugin: anyone may trigger; the tax always goes to the key's taxRecipient.
     receive(msg: CollectTax) {
         require(context().value >= COLLECT_GAS, "Insufficient TON attached");
-        message(MessageParameters {
-            to: contractAddress(initOf Pool(myAddress(), msg.key)),
-            value: 0,
-            mode: SendRemainingValue,
-            bounce: true,
-            body: PoolCollectTax { queryId: msg.queryId, excessTo: sender() }.toCell(),
-        });
+        self.toPool(msg.key, PoolCollectTax { queryId: msg.queryId, excessTo: sender() }.toCell());
     }
 
     // PLATFORM FEE: anyone may flush a pool's carried platform fees; they always go to the treasury.
     receive(msg: CollectPlatformFees) {
         require(context().value >= COLLECT_GAS, "Insufficient TON attached");
-        message(MessageParameters {
-            to: contractAddress(initOf Pool(myAddress(), msg.key)),
-            value: 0,
-            mode: SendRemainingValue,
-            bounce: true,
-            body: PoolCollectPlatform { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell(),
-        });
+        self.toPool(msg.key, PoolCollectPlatform { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell());
+    }
+
+    // v3: anyone may send a pool's unaccounted surplus Gram to the treasury (see PoolSweepSurplus).
+    receive(msg: SweepPoolSurplus) {
+        require(context().value >= COLLECT_GAS, "Insufficient TON attached");
+        self.toPool(msg.key, PoolSweepSurplus { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell());
     }
 
     receive(msg: CollectProtocolFees) {
         require(context().value >= COLLECT_GAS, "Insufficient TON attached");
-        message(MessageParameters {
-            to: contractAddress(initOf Pool(myAddress(), msg.key)),
-            value: 0,
-            mode: SendRemainingValue,
-            bounce: true,
-            body: PoolCollectProtocol { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell(),
-        });
+        self.toPool(msg.key, PoolCollectProtocol { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell());
     }
 
     // -----------------------------------------------------------------------
@@ -374,7 +364,9 @@ contract Router {
 
     receive(msg: SetTreasury) {
         self.requireAdmin();
-        require(msg.treasury != myAddress(), "Invalid recipient");
+        // v3 (audit M-2): basechain only. A workchain-1, anycast or addr_var treasury would fail
+        // the platform payout inside every launch-key swap.
+        require(msg.treasury != myAddress() && isBasechain(msg.treasury), "Invalid recipient");
         self.treasury = msg.treasury;
         self.refundRemaining(msg.queryId);
     }
@@ -731,6 +723,20 @@ contract Router {
             return PoolKey { token0: a, token1: b, tickSpacing, ext };
         }
         return PoolKey { token0: b, token1: a, tickSpacing, ext };
+    }
+
+    // v3 (audit L-3): collect / sweep ops go out non-bounceable with the pool's StateInit, so a
+    // key whose pool was never deployed (a typo, a wrong ext) still reaches a Pool, which returns
+    // the caller's value as excess instead of the bounce being kept here.
+    fun toPool(key: PoolKey, body: Cell) {
+        require(self.extFlags(key.ext) >= 0, "Invalid key");
+        deploy(DeployParameters {
+            init: initOf Pool(myAddress(), key),
+            value: 0,
+            mode: SendRemainingValue,
+            bounce: false,
+            body,
+        });
     }
 
     fun sendToPool(key: PoolKey, body: Cell) {

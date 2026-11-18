@@ -306,6 +306,13 @@ message(0x4d48001e) CollectPlatformFees {
     key: PoolKey;
 }
 
+// v3: anyone may send a pool's surplus Gram (balance above keep(): Gram stranded by a failed
+// transaction, or a donation) to the treasury, from where it can be returned to its owner.
+message(0x4d48001f) SweepPoolSurplus {
+    queryId: Int as uint64;
+    key: PoolKey;
+}
+
 // ---------------------------------------------------------------------------
 // Router -> Pool
 // ---------------------------------------------------------------------------
@@ -390,6 +397,12 @@ message(0x4d480027) PoolCollectTax {
 }
 
 message(0x4d480029) PoolCollectPlatform {
+    queryId: Int as uint64;
+    treasury: Address;
+    excessTo: Address;
+}
+
+message(0x4d48002a) PoolSweepSurplus {
     queryId: Int as uint64;
     treasury: Address;
     excessTo: Address;

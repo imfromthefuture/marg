@@ -14,6 +14,7 @@ import { LaunchJetton } from '../build/Launch_LaunchJetton';
 import { LaunchWallet } from '../build/Launch_LaunchWallet';
 import { Router, storeSwapPayload, storeLaunchPayload as storeLaunchPayloadD, loadKeyExt } from '../../dex/v2/build/Router_Router';
 import { Pool } from '../../dex/v2/build/Router_Pool';
+import { poolCodeArgs } from './poolcode';
 import { Position } from '../../dex/v2/build/Router_Position';
 import {
     txOk, events, swapEvents, initEvents, launchEvents, gramPayouts, refundCodes, opOf, gasAt, OP, REASON, CODES,
@@ -126,7 +127,7 @@ describe('Marg direct launch (factory + jetton + DEX v2)', () => {
         router = chain.openContract(await Router.fromInit(admin.address, treasury.address));
         expect((await router.send(admin.getSender(), { value: toNano('1') }, null)).transactions)
             .toHaveTransaction({ to: router.address, deploy: true, success: true });
-        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS));
+        factory = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE, TIERS, ...(await poolCodeArgs())));
         expect((await factory.send(admin.getSender(), { value: toNano('0.5') }, null)).transactions)
             .toHaveTransaction({ to: factory.address, deploy: true, success: true });
         base = chain.snapshot();
@@ -195,7 +196,8 @@ describe('Marg direct launch (factory + jetton + DEX v2)', () => {
         expect((await chain.getContract(treasury.address)).balance - tb).toBeGreaterThanOrEqual(LAUNCH_FEE - toNano('0.001'));
         const spent = cb - (await chain.getContract(creator.address)).balance;
         expect(spent).toBeGreaterThan(LAUNCH_FEE);
-        expect(spent).toBeLessThan(LAUNCH_FEE + toNano('0.45'));
+        // (v3: 0.45 -> 0.47. The dex/v2 v3 Pool alone is at 0.4508; the master's pool-address and launch-fee settlement add ~0.005.)
+        expect(spent).toBeLessThan(LAUNCH_FEE + toNano('0.47'));
         // Launch info getter (what a web app shows).
         const info = await master.getGetLaunchInfo();
         expect([info.creator.equals(creator.address), info.feeClaimer.equals(treasury.address), info.tickSpacing, info.buyTaxBps, info.sellTaxBps])
@@ -440,7 +442,8 @@ describe('Marg direct launch (factory + jetton + DEX v2)', () => {
         const { master } = await opened(0n);
         const info = await master.getGetLaunchInfo();
         const res = await master.send(bob.getSender(), { value: toNano('2') }, {
-            $$type: 'LaunchSetup', queryId: 0n, content: Cell.EMPTY, info, devBuy: 0n, minDevOut: 0n, routerValue: toNano('0.6'),
+            $$type: 'LaunchSetup', queryId: 0n, index: 0n, launchFee: 0n, content: Cell.EMPTY, info, devBuy: 0n, minDevOut: 0n, routerValue: toNano('0.6'),
+            poolCodeHash: 0n, poolCodeDepth: 0n,
         });
         expect(res.transactions).toHaveTransaction({ to: master.address, success: false });
         expect((await master.getGetJettonData()).totalSupply).toBe(SUPPLY);
@@ -461,7 +464,7 @@ describe('Marg direct launch (factory + jetton + DEX v2)', () => {
         // A factory deployed with a spacing that is not a DEX preset (SetLaunchParams refuses it; init does not check).
         const bad30 = { ...PARAMS, tickSpacing: 30n };
         const f2 = chain.openContract(await LaunchFactory.fromInit(admin.address, treasury.address, router.address, LAUNCH_FEE,
-            { ...TIERS, low: bad30 }));
+            { ...TIERS, low: bad30 }, ...(await poolCodeArgs())));
         await f2.send(admin.getSender(), { value: toNano('0.5') }, null);
         const cb = (await chain.getContract(creator.address)).balance;
         const devBuy = toNano('50');

@@ -44,13 +44,23 @@ Tokens launch straight into a MARG DEX pool in one transaction: no bonding curve
 
 | Contract | Address |
 |---|---|
+| DEX Router | `EQB5dkciMSABWKovdVBUs69piI2fBjyn5oqw46wbyRPe5A0H` |
+| Launch factory | `EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1` |
+| Fee converter | `EQDQBf97VzDmmvzz-CdtyNmEJwwxZWvmykPuyx2pQFMdaM6M` |
+
+These are the v3 contracts (this source). New launches and new pools use them. The earlier v2
+deployment (git tag `mainnet-v2`) stays live for the tokens launched on it, and the app still trades them
+through their own pools:
+
+| v2 contract | Address |
+|---|---|
 | DEX Router | `EQDBEgfjO5B2K5hRGT9X1QNN5r7gCdB96xs0vXcS7aVdevpx` |
 | Launch factory | `EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb` |
 | Fee converter | `EQAuTS8PGDSv7l8KCQgLVgGQtD2QPVuvfpDOLPbiNCra4z4y` |
 
 The contracts are not upgradeable: nobody, including the admin, can change their code. Admin powers are limited to settings, most of them capped:
 
-- **Router:** platform fee (≤ 1%), the protocol share of pool fees (≤ 25%, default 10%, also on existing pools), adding fee presets (add-only, base fee ≤ 2%, new pools only), pausing the creation of new plain pools (launches are not affected), and the treasury.
+- **Router:** platform fee (≤ 1%), the protocol share of pool fees (≤ 25%, default 10%, also on existing pools), adding fee presets (add-only, base fee ≤ 2%, new pools only), pausing the creation of new plain pools (launches are not affected), and the treasury (basechain only). Anyone can send a pool's surplus Gram (above its reserves, fees and storage reserve) to the treasury with `SweepPoolSurplus`.
 - **Launch factory:** launch tiers, the treasury (new launches only), and the launch fee (can only go down).
 - **Fee converter:** the keeper, approved sell routes and the treasury wallet.
 

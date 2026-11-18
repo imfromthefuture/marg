@@ -1,0 +1,5 @@
+{
+  "projects": [
+    { "name": "Assembler", "path": "./assembler.tact", "output": "./build", "options": { "debug": false, "external": false } }
+  ]
+}
