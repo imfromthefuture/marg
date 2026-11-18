@@ -48,9 +48,8 @@ Tokens launch straight into a MARG DEX pool in one transaction: no bonding curve
 | Launch factory | `EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1` |
 | Fee converter | `EQDQBf97VzDmmvzz-CdtyNmEJwwxZWvmykPuyx2pQFMdaM6M` |
 
-These are the v3 contracts (this source). New launches and new pools use them. The earlier v2
-deployment (git tag `mainnet-v2`) stays live for the tokens launched on it, and the app still trades them
-through their own pools:
+These are the v3 contracts (this source, git tag `mainnet-v3`). The earlier v2 deployment (git tag
+`mainnet-v2`) still exists on chain, but the app and indexer no longer list it:
 
 | v2 contract | Address |
 |---|---|

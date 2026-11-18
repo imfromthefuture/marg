@@ -8,7 +8,7 @@ Group=tron-indexer
 WorkingDirectory=/opt/tron-indexer
 Environment=PORT=8811
 Environment=NETWORK=mainnet
-Environment=LAUNCH_FACTORY=EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb,EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1
+Environment=LAUNCH_FACTORY=EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1
 Environment=DEX_ROUTER=EQB5dkciMSABWKovdVBUs69piI2fBjyn5oqw46wbyRPe5A0H
 Environment=DEX_PLAIN_CHECK_SEC=60
 Environment=DB_PATH=/var/lib/tron-indexer/marg.db
