@@ -242,11 +242,17 @@ function NewPosition({ initial }: { initial: DexToken | null }) {
 
     // Gram + an unverified jetton in one transfer is refused (see trustedJetton in dex.ts).
     const untrusted = !!t1 && !!t0 && !t0.master && !!dep && dep.a0 > 0n && dep.a1 > 0n && !trustedJetton(t1);
-    const ready = !!pool && (live || (canInit && sqrtP > 0n)) && !!ticks && !!dep && dep.L >= 1000n && !short0 && !short1 && !check && !untrusted;
+    // MARG launch tokens: no new positions, in the launch pool or in any other pool of the pair. A
+    // one-sided range in a taxed launch pool works as a limit order that skips the creator tax and the
+    // platform fee (both are charged on swaps only), and a second plain pool would split the token's
+    // liquidity away from its taxed launch pool. Existing positions are unaffected.
+    const launchPair = !!pools?.some((p) => p.canonical || !!p.key.ext);
+    const ready = !launchPair && !!pool && (live || (canInit && sqrtP > 0n)) && !!ticks && !!dep && dep.L >= 1000n && !short0 && !short1 && !check && !untrusted;
     const label = !DEX_LIVE ? CLOSED_LABEL
         : !wallet ? 'Connect wallet'
             : !tokenB ? 'Select a token'
                 : !pool ? 'Loading pools…'
+                : launchPair ? 'Launch tokens trade in their launch pool only'
                     : !live && !canInit ? 'This pool is opened by its launch'
                         : !live && !(sqrtP > 0n) ? 'Set a starting price'
                             : !ticks ? 'Set a price range'
@@ -286,7 +292,11 @@ function NewPosition({ initial }: { initial: DexToken | null }) {
                 </>
             )}
 
-            {pool && canInit && (
+            {launchPair && (
+                <p className="swap-warn">{t1?.symbol ?? 'This token'} is a MARG launch token. Its liquidity is locked in the launch pool, so new positions are not offered for this pair.</p>
+            )}
+
+            {pool && canInit && !launchPair && (
                 <label>
                     Starting price ({priceUnit})
                     <input value={startP} onChange={(e) => setStartP(e.target.value)} inputMode="decimal" placeholder="0.000001" />
@@ -294,7 +304,7 @@ function NewPosition({ initial }: { initial: DexToken | null }) {
                 </label>
             )}
 
-            {pool && sqrtP > 0n && (
+            {pool && sqrtP > 0n && !launchPair && (
                 <>
                     <div className="panel-head range-head">
                         <span className="field-label">Price range <span className="hint">({priceUnit})</span></span>

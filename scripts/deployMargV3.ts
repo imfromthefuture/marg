@@ -3,6 +3,7 @@ import { NetworkProvider } from '@ton/blueprint';
 import { Router } from '../dex/v2/build/Router_Router';
 import { LaunchFactory } from '../launch/build/Launch_LaunchFactory';
 import { FeeConverter } from '../fees/build/FeeConverter_FeeConverter';
+import { requireBasechain } from './guards';
 
 // Fresh MARG deploy with the Gram platform fee: Router, FeeConverter (every platform fee ends up with
 // TREASURY as Gram), Router treasury -> converter, then the launch factory (treasury/feeClaimer = converter,
@@ -10,7 +11,7 @@ import { FeeConverter } from '../fees/build/FeeConverter_FeeConverter';
 // Usage: TREASURY=<wallet> [KEEPER=<addr>] LAUNCH_FEE=<gram> [DRY_RUN=1] npx blueprint run deployMargV3 --mainnet --mnemonic
 export async function run(provider: NetworkProvider) {
     const admin = provider.sender().address!;
-    const treasury = Address.parse(required('TREASURY'));
+    const treasury = requireBasechain('TREASURY', process.env.TREASURY);
     const keeper = process.env.KEEPER ? Address.parse(process.env.KEEPER) : null;
     const launchFee = toNano(process.env.LAUNCH_FEE ?? '0.5');
     const lp = (mcap: string) => ({ $$type: 'LaunchParams' as const, startMcap: toNano(mcap), tickSpacing: 10n });

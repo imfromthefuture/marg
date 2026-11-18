@@ -48,7 +48,15 @@ Tokens launch straight into a MARG DEX pool in one transaction: no bonding curve
 | Launch factory | `EQD2Uk5We90UtHN3ru2iRNpP44eEa3wsPnsd9zKbn5g2qCxb` |
 | Fee converter | `EQAuTS8PGDSv7l8KCQgLVgGQtD2QPVuvfpDOLPbiNCra4z4y` |
 
-The contracts are not upgradeable: nobody, including the admin, can change their code. Admin powers are limited to capped settings (platform fee ≤ 1%, launch tiers, treasury, launch fee can only go down).
+The contracts are not upgradeable: nobody, including the admin, can change their code. Admin powers are limited to settings, most of them capped:
+
+- **Router:** platform fee (≤ 1%), the protocol share of pool fees (≤ 25%, default 10%, also on existing pools), adding fee presets (add-only, base fee ≤ 2%, new pools only), pausing the creation of new plain pools (launches are not affected), and the treasury.
+- **Launch factory:** launch tiers, the treasury (new launches only), and the launch fee (can only go down).
+- **Fee converter:** the keeper, approved sell routes and the treasury wallet.
+
+No admin power reaches LP reserves, positions, locked launch liquidity or pending taxes. Admin roles move only by a two-step handover (nominate, then claim from the new wallet).
+
+The creator tax and the platform fee are charged on swaps in a token's launch pool. The app trades launch tokens only through that pool and does not open other pools or new positions for them.
 
 ## Build and test
 

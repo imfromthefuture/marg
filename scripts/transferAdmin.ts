@@ -3,6 +3,7 @@ import { NetworkProvider } from '@ton/blueprint';
 import { Router } from '../dex/v2/build/Router_Router';
 import { LaunchFactory } from '../launch/build/Launch_LaunchFactory';
 import { FeeConverter } from '../fees/build/FeeConverter_FeeConverter';
+import { requireBasechain } from './guards';
 
 // Step 1 of the two-step admin handover for the Router, the launch factory and the fee converter:
 // the current admin nominates NEW_ADMIN (pendingAdmin). Nothing changes until NEW_ADMIN sends the
@@ -12,7 +13,7 @@ import { FeeConverter } from '../fees/build/FeeConverter_FeeConverter';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function run(provider: NetworkProvider) {
-    const newAdmin = Address.parse(process.env.NEW_ADMIN!);
+    const newAdmin = requireBasechain('NEW_ADMIN', process.env.NEW_ADMIN);
     const router = provider.open(Router.fromAddress(Address.parse(process.env.ROUTER!)));
     const factory = provider.open(LaunchFactory.fromAddress(Address.parse(process.env.FACTORY!)));
     const converter = provider.open(FeeConverter.fromAddress(Address.parse(process.env.CONVERTER!)));

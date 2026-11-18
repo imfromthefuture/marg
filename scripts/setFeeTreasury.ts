@@ -1,13 +1,14 @@
 import { Address, toNano } from '@ton/core';
 import { NetworkProvider } from '@ton/blueprint';
 import { FeeConverter } from '../fees/build/FeeConverter_FeeConverter';
+import { requireBasechain } from './guards';
 
 // Points the FeeConverter at a new treasury wallet (admin only). The attached 0.05 is forwarded to
 // the treasury like any other Gram.
 // Usage: CONVERTER=<addr> TREASURY=<wallet> npx blueprint run setFeeTreasury --mainnet --mnemonic
 export async function run(provider: NetworkProvider) {
     const converter = provider.open(FeeConverter.fromAddress(Address.parse(process.env.CONVERTER!)));
-    const treasury = Address.parse(process.env.TREASURY!);
+    const treasury = requireBasechain('TREASURY', process.env.TREASURY);
     const before = await converter.getGetConverterData();
     const sender = provider.sender().address!;
     console.log('Converter     ', converter.address.toString());
