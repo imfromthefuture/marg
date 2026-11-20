@@ -448,7 +448,7 @@ describe('v2 invariant: 300 seeded random operations, chain == model after every
             } else if (roll < 0.96) {
                 // --- protocol fee collection (anyone), always to the treasury
                 const st = await pr.pool.getGetPoolState();
-                const res = await d.router.send(user.getSender(), { value: toNano('0.3') }, {
+                const res = await d.router.send(user.getSender(), { value: toNano('0.35') }, {
                     $$type: 'CollectProtocolFees', queryId: 3n,
                     key: { $$type: 'PoolKey', token0: st.key.token0, token1: st.key.token1, tickSpacing: st.key.tickSpacing, ext: st.key.ext },
                 });
@@ -530,7 +530,7 @@ describe('v2 invariant: 300 seeded random operations, chain == model after every
         }
         for (const pr of pools) {
             const st = await pr.pool.getGetPoolState();
-            const res = await d.router.send(d.bob.getSender(), { value: toNano('0.3') }, {
+            const res = await d.router.send(d.bob.getSender(), { value: toNano('0.35') }, {
                 $$type: 'CollectProtocolFees', queryId: 3n,
                 key: { $$type: 'PoolKey', token0: st.key.token0, token1: st.key.token1, tickSpacing: st.key.tickSpacing, ext: st.key.ext },
             });

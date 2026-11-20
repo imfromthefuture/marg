@@ -3,11 +3,22 @@ import { Address, beginCell, toNano } from '@ton/core';
 import { useTonAddress, useTonConnectUI } from '@tonconnect/ui-react';
 import { LaunchJetton, storeHarvest, type BuybackStatus, type RewardsData } from '../../launch/build/Launch_LaunchJetton';
 import { LaunchWallet, storeClaimRewards } from '../../launch/build/Launch_LaunchWallet';
-import { client, fmtTokens, fmtTon, q, walletTopUp } from './ton';
+import { client, fmtTokens, fmtTon, prefetchWalletTopUp, q, walletTopUp } from './ton';
 import type { LaunchInfo } from './dex';
 
-// Covers get_reward_values().claim (gas-priced, ~0.01 Gram today); the unused part comes back with the rewards.
-const CLAIM_ATTACH = toNano('0.06');
+// The claim attaches the wallet's own get_reward_values().claim (gas-priced) plus a margin; the unused part
+// comes back with the rewards. Wallets without that getter (none on v3+) fall back to the old 0.06.
+const CLAIM_MARGIN = toNano('0.02');
+const CLAIM_FALLBACK = toNano('0.06');
+
+// get_rewards_data read field by field: masters before v4 return 6 fields, v4 adds rentFund.
+async function readRewards(master: Address): Promise<RewardsData> {
+    const t = (await q(() => client.runMethod(master, 'get_rewards_data'))).stack;
+    const scale = t.readBigNumber(), acc = t.readBigNumber(), totalShares = t.readBigNumber();
+    const accrued = t.readBigNumber(), claimed = t.readBigNumber(), carry = t.readBigNumber();
+    const rentFund = t.remaining > 0 ? t.readBigNumber() : 0n;
+    return { $$type: 'RewardsData', scale, acc, totalShares, accrued, claimed, carry, rentFund };
+}
 
 // Holder rewards and buyback & burn of a taxed launch token (both live in the token master).
 // poolTax: tax waiting in the pool (PoolState.taxFees); a keeper collects it, anyone can too.
@@ -27,13 +38,14 @@ export function RewardsCard({ master, info, symbol, poolTax }: { master: Address
     async function load() {
         const m = client.open(LaunchJetton.fromAddress(master));
         setHarvestValue(await q(() => m.getGetHarvestValue()).catch(() => null));
-        if (hasRewards) setRewards(await q(() => m.getGetRewardsData()).catch(() => null));
+        if (hasRewards) setRewards(await readRewards(master).catch(() => null));
         if (hasBuyback) setBuyback(await q(() => m.getGetBuybackStatus()).catch(() => null));
         if (!hasRewards || !owner) return setMine(null);
         try {
             const wallet = await q(() => m.getGetWalletAddress(Address.parse(owner)));
             const st = await q(() => client.getContractState(wallet));
             if (st.state !== 'active') return setMine({ wallet, pending: 0n, busy: false });
+            prefetchWalletTopUp(wallet);    // C8: the top-up check runs now, not on the claim click
             const rs = await q(() => client.open(LaunchWallet.fromAddress(wallet)).getGetRewardState());
             const pending = await q(() => m.getGetPendingRewards(rs.acked, rs.lastAcc, rs.frac, rs.owed));
             setMine({ wallet, pending, busy: rs.inFlight !== 0n });
@@ -50,11 +62,13 @@ export function RewardsCard({ master, info, symbol, poolTax }: { master: Address
             setStatus('Confirm in your wallet…');
             const body = beginCell().store(storeClaimRewards({ $$type: 'ClaimRewards', queryId: 0n })).endCell();
             const top = await walletTopUp(mine.wallet);    // a nearly empty wallet first gets 0.05 Gram (see ton.ts)
+            const need = await q(() => client.open(LaunchWallet.fromAddress(mine.wallet)).getGetRewardValues())
+                .then((v) => v.claim + CLAIM_MARGIN).catch(() => CLAIM_FALLBACK);
             await tonConnect.sendTransaction({
                 validUntil: Math.floor(Date.now() / 1000) + 300,
                 messages: [
                     ...(top ? [top] : []),
-                    { address: mine.wallet.toString(), amount: CLAIM_ATTACH.toString(), payload: body.toBoc().toString('base64') },
+                    { address: mine.wallet.toString(), amount: need.toString(), payload: body.toBoc().toString('base64') },
                 ],
             });
             setStatus('Claim sent. The Gram arrives in your wallet in a few seconds.');

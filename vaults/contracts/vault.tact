@@ -25,7 +25,7 @@ const DEFAULT_PERF_FEE_BPS: Int = 1000;
 const DEAD_SHARES: Int = 1000000;
 const SHARES_PER_UNIT: Int = 1000;              // 1 share (1e9 units) = 1e6 token1 units at opening
 const MIN_OPEN_VALUE: Int = 10000000;           // token1 units (10 USDT)
-const MAX_QUEUE: Int = 32;
+const MAX_QUEUE: Int = 64;
 const MAX_SLOTS: Int = 3;                       // live positions a deposit observes (normally 1-2); DEPOSIT_GAS covers 3
 const MIN_REBALANCE_INTERVAL: Int = 60;
 const REBALANCE_TIMEOUT: Int = 1800;
@@ -33,6 +33,12 @@ const PAYOUT_WAIT: Int = 600;                   // a withdrawal waits this long 
 const MAX_OBS_AGE: Int = 120;                   // a price decision needs an observation this fresh
 const OP_DEADLINE: Int = 86400;                 // deadlines on DEX ops: never the binding constraint
 const MIN_MINT_LIQUIDITY: Int = 10000;          // skip mints below this (DEX minimum is 1000)
+const MIN_WITHDRAW_SHARES: Int = 100000000;     // 0.1 share (~0.1 USDT at opening), or supply/10^6 if smaller: no dust burns into the queue (audit L-2)
+const MAX_UDEC_TRIES: Int = 3;                  // a user decrease the DEX refuses this often takes the terminal path (audit H-1)
+const DEP_TIMEOUT: Int = 600;                   // a deposit whose observation is not back after this is refundable (audit M-1)
+const RECOVERY_DELAY: Int = 90000;              // OP_DEADLINE + 1 h: no DEX op of the vault can still execute (audit M-1)
+const RECOVER_MAX: Int = 4;                     // items resolved per Recover
+const MINT_BAND_DIV: Int = 4;                   // rebalance mints: price band spot ± maxDeviation/4 (audit L-3)
 const STALE_FG: Int = 0x8000000000000000000000000000000000000000000000000000000000000000;   // 2^255
 
 // strategy hard caps (admin can only move inside them)
@@ -55,12 +61,16 @@ const MINT_NATIVE_GAS: Int = ton("0.72");       // MintNativeNotify value on top
 const JETTON_OUT_VALUE: Int = ton("0.08");
 const FWD_EST: Int = ton("0.005");              // forward fee + compute share per send
 const HANDLER_EST: Int = ton("0.03");           // compute of a handler not charged exactly
-const WITHDRAW_GAS: Int = ton("1.6");           // 0.2 + 2 positions x (collect + decrease) x POS_OP_VALUE
+const WITHDRAW_GAS: Int = ton("1.8");           // 2 positions x (collect + decrease + forwarding) + idle payouts + compute
+const USER_PAY_GAS: Int = ton("0.16");          // held per user decrease: forwarding its legs (USDT transfer 0.08 + compute
+                                                // of the forwarding tx, 100k gas = 0.04 at 400 nG/gas, x1.5 + fees); the
+                                                // unused part reaches the withdrawer as the USDT transfer's excess
 const REBALANCE_GAS: Int = ton("3.5");
 const OPEN_GAS: Int = ton("1.5");
 const SETUP_QUERY_VALUE: Int = ton("0.05");
 const POKE_GAS: Int = ton("0.1");
 const COLLECT_FEES_GAS: Int = ton("0.15");
+const RECOVER_GAS: Int = ton("0.5");
 const REFUND_MIN: Int = ton("0.06");
 const DUST_GRAM: Int = ton("0.001");
 
@@ -82,6 +92,7 @@ const K_MINT: Int = 1;
 const K_CLOSE: Int = 2;
 const K_COLLECT: Int = 3;
 const K_UDEC: Int = 4;
+const K_SYNC: Int = 5;                          // re-sync collect after a lost receipt (Recover)
 const K_OBS: Int = 6;
 const K_PAYOUT: Int = 17;
 const K_FEE: Int = 18;
@@ -119,6 +130,7 @@ const D_ORACLE: Int = 2;
 const D_MIN_SHARES: Int = 3;
 const D_CHANGED: Int = 4;
 const D_BAD: Int = 5;
+const D_TIMEOUT: Int = 6;
 
 fun isBasechain(a: Address): Bool {
     let s = a.asSlice();
@@ -239,6 +251,10 @@ struct Cold {
     wdl: map<Int as uint8, Int as uint128>;     // worker: slot -> liquidity still to decrease for the user
     lastRebalance: Int as uint32;
     baseCenter: Int as int24;
+    due0: Int as coins;             // owed to withdrawers by their user decreases (inside idle / exp)
+    due1: Int as coins;
+    opGas: Int as coins;            // Σ op.g (held)
+    wtry: map<Int as uint8, Int as uint8>;      // worker: slot -> refused user decreases
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +423,7 @@ extends mutates fun openVault(self: Cold, msg: JettonNotification, p: OpenPayloa
     self.openSqrt = p.sqrtPriceInitX96;
     self.openReceiver = p.receiver != null ? p.receiver!! : msg.sender;
     self.reb = Reb { step: STEP_OBSERVE, startedAt: now(), budget: ctx.value - p.gramAmount, payer: msg.sender,
-                     round: 0, need: 0, twap: 0, since: self.seq + 1 };
+                     round: 0, need: 0, twap: 0, since: self.seq + 1, spot: 0 };
     self.gasCtx = C_REB;
     self.rebObserve(false);
 }
@@ -640,7 +656,7 @@ extends mutates fun queueDeposit(self: Cold, from: Address, receiver: Address, a
     let need = self.roundNeed(true);
     let round = self.startRound(true);
     let gas = max(0, value - need * (OBS_VALUE + FWD_EST) - HANDLER_EST);
-    self.deps.set(round, Dep { from, receiver, a0, a1, minShares, gas, need, epoch: self.epoch });
+    self.deps.set(round, Dep { from, receiver, a0, a1, minShares, gas, need, epoch: self.epoch, at: now() });
     self.pendG += a0 + gas;
     self.pendU += a1;
 }
@@ -685,23 +701,29 @@ extends mutates fun finishDeposit(self: Cold, round: Int, d: Dep) {
         }
     }
     if (code != 0) {
-        emit(DepositRefusedEvent { from: d.from, amount0: d.a0, amount1: d.a1, code }.toCell());
-        if (d.a1 > 0 && left >= JETTON_OUT_VALUE + FWD_EST) {
-            self.sendUsdt(self.nextQ(K_REFUND), d.a1, d.from, JETTON_OUT_VALUE, 0, null, d.from);
-            left -= JETTON_OUT_VALUE + FWD_EST;
-        } else if (d.a1 > 0) {
-            self.idle1 += d.a1;     // unreachable (DEPOSIT_GAS covers the refund): holders keep it
-        }
-        message(MessageParameters {
-            to: d.from, value: d.a0 + left, mode: SendPayGasSeparately | SendIgnoreErrors, bounce: false,
-            body: VaultPayout { queryId: 0, reason: PAYOUT_REFUND, amount: d.a0 }.toCell(),
-        });
+        self.depositRefund(d, left, code);
         return;
     }
     self.idle0 += d.a0;
     self.idle1 += d.a1;
     self.mintShares(d.receiver, shares, left, d.from);
     emit(DepositEvent { receiver: d.receiver, amount0: d.a0, amount1: d.a1, shares, twapTick: twap }.toCell());
+}
+
+// Both legs of a refused (or timed-out) deposit back to its sender; `left` is its remaining gas.
+extends mutates fun depositRefund(self: Cold, d: Dep, left0: Int, code: Int) {
+    let left = left0;
+    emit(DepositRefusedEvent { from: d.from, amount0: d.a0, amount1: d.a1, code }.toCell());
+    if (d.a1 > 0 && left >= JETTON_OUT_VALUE + FWD_EST) {
+        self.sendUsdt(self.nextQ(K_REFUND), d.a1, d.from, JETTON_OUT_VALUE, 0, null, d.from);
+        left -= JETTON_OUT_VALUE + FWD_EST;
+    } else if (d.a1 > 0) {
+        self.idle1 += d.a1;     // unreachable (DEPOSIT_GAS covers the refund): holders keep it
+    }
+    message(MessageParameters {
+        to: d.from, value: d.a0 + left, mode: SendPayGasSeparately | SendIgnoreErrors, bounce: false,
+        body: VaultPayout { queryId: 0, reason: PAYOUT_REFUND, amount: d.a0 }.toCell(),
+    });
 }
 
 // Shares for a deposit: the smaller of the TWAP quote and the spot quote (a manipulated spot cannot
@@ -729,7 +751,7 @@ extends mutates fun quoteShares(self: Cold, a0: Int, a1: Int, ov: OracleView): I
 extends mutates fun navAt(self: Cold, tick: Int, sqrtP: Int): Int {
     let p = priceQ64(sqrtP);
     let bps = self.strategy.perfFeeBps;
-    let v = valueOf(self.idle0 + self.exp0 - self.owe0, self.idle1 + self.exp1 - self.owe1, p);
+    let v = valueOf(self.idle0 + self.exp0 - self.owe0 - self.due0, self.idle1 + self.exp1 - self.owe1 - self.due1, p);
     foreach (slot, pos in self.positions) {
         let l = pos.L - pos.reserved;
         if (l > 0) {
@@ -770,9 +792,10 @@ extends mutates fun rJettonBurnNotification(self: Cold, msg: JettonBurnNotificat
     let ctx = context();
     require(ctx.sender == self.walletAddress(msg.sender), "Invalid wallet");
     require(self.phase == PHASE_IDLE || self.phase == PHASE_REB, "Not open");
-    require(msg.amount > 0 && msg.amount <= self.supply - DEAD_SHARES, "Invalid amount");
+    require(msg.amount >= max(1, min(MIN_WITHDRAW_SHARES, self.supply / 1000000)) && msg.amount <= self.supply - DEAD_SHARES,
+        "Invalid amount");
     let recipient = msg.responseDestination != null ? msg.responseDestination!! : msg.sender;
-    require(isBasechain(recipient) && recipient != myAddress(), "Invalid recipient");
+    require(self.validRecipient(recipient), "Invalid recipient");
     require(self.qTail - self.qHead < MAX_QUEUE, "Queue full");
     require(ctx.value >= WITHDRAW_GAS, "Insufficient TON attached");
     let budget = ctx.value - HANDLER_EST;
@@ -780,6 +803,28 @@ extends mutates fun rJettonBurnNotification(self: Cold, msg: JettonBurnNotificat
     self.qTail += 1;
     self.queueGas += budget;
     self.workerKick();
+}
+
+// A withdrawal recipient (audit H-1): a basechain address that is none of the contracts the vault
+// talks to (a payout there would be stranded or refused).
+extends mutates fun validRecipient(self: Cold, a: Address): Bool {
+    if (!isBasechain(a) || a == myAddress()) {
+        return false;
+    }
+    let cfg = self.cfgGet();
+    if (a == cfg.router || a == cfg.usdtMaster) {
+        return false;
+    }
+    if (self.pool != null && a == self.pool!!) {
+        return false;
+    }
+    if (self.usdtWallet != null && a == self.usdtWallet!!) {
+        return false;
+    }
+    if (self.rwUsdt != null && a == self.rwUsdt!!) {
+        return false;
+    }
+    return true;
 }
 
 extends mutates fun workerKick(self: Cold) {
@@ -804,12 +849,14 @@ extends mutates fun workerStart(self: Cold): Bool {
     self.worker = Worker { recipient: r.recipient, shares: r.shares, budget: r.budget, stage: W_COLLECT, pending: 0,
                            waitUntil: now() + PAYOUT_WAIT, dL0: 0, dL1: 0, since: self.seq + 1 };
     self.wdl = emptyMap();
+    self.wtry = emptyMap();
     self.gasCtx = C_WORKER;
     self.epoch += 1;
     // Collect every position's fees to the vault first: the withdrawer's share then includes them.
     let n = 0;
-    foreach (slot, p in self.positions) {
-        if (p.L > 0 && self.sendPosOp(K_COLLECT, C_WORKER, slot, 0, myAddress())) {
+    let ps = self.positions;
+    foreach (slot, p in ps) {
+        if (p.L > 0 && self.sendPosOp(K_COLLECT, C_WORKER, slot, 0, null, 0)) {
             n += 1;
         }
     }
@@ -836,14 +883,22 @@ extends mutates fun workerPump(self: Cold) {
         w = self.worker!!;
     }
     if (w.stage == W_DECREASE) {
-        // (Re)send the user's decrease on every slot that still owes it and is free.
-        foreach (slot, dL in self.wdl) {
+        // (Re)send the user's decrease on every slot that still owes it and is free. A decrease the
+        // DEX refused MAX_UDEC_TRIES times takes the terminal path (never an endless retry).
+        let m = self.wdl;
+        foreach (slot, dL in m) {
             let p = self.positions.get(slot);
-            if (p != null && p!!.busy == 0) {
-                self.sendPosOp(K_UDEC, C_WORKER, slot, dL, w.recipient);
+            let tries = self.wtry.get(slot);
+            if (p == null || (tries != null && tries!! >= MAX_UDEC_TRIES)) {
+                if (p == null || p!!.busy == 0) {
+                    self.udecGiveUp(slot, dL);
+                }
+            } else if (p!!.busy == 0) {
+                self.sendPosOp(K_UDEC, C_WORKER, slot, dL, w.recipient, 0);
             }
         }
         if (self.wdl.isEmpty()) {
+            w = self.worker!!;
             self.worker = null;
             let refund = min(w.budget, self.freeBalance());
             self.refundGas(w.recipient, refund, 0);
@@ -852,7 +907,7 @@ extends mutates fun workerPump(self: Cold) {
 }
 
 // Pro-rata, in kind, price-free: shares/supply of idle (paid now) and of every position's liquidity
-// (decreased straight to the user by the Pool).
+// (decreased to the vault, then forwarded to the user with his pro-rata share of the fees).
 extends mutates fun workerPay(self: Cold) {
     let w = self.worker!!;
     let S = self.supply;
@@ -866,7 +921,8 @@ extends mutates fun workerPay(self: Cold) {
     self.idle1 -= u;
     self.supply -= s;
     self.epoch += 1;
-    foreach (slot, p in self.positions) {
+    let ps = self.positions;
+    foreach (slot, p in ps) {
         if (p.L > p.reserved) {
             let dL = mulDiv(p.L, s, S);
             if (dL > 0) {
@@ -894,6 +950,46 @@ extends mutates fun workerPay(self: Cold) {
     emit(WithdrawEvent { recipient: w.recipient, shares: s, amount0: g, amount1: u, dL0: w.dL0, dL1: w.dL1 }.toCell());
 }
 
+// Terminal path of a user decrease (audit H-1): the DEX refused it MAX_UDEC_TRIES times. Its
+// liquidity goes back to the holders and the withdrawer gets new shares worth it, priced like a
+// deposit (the worse of TWAP and spot of the last observation, so the holders never pay more).
+extends mutates fun udecGiveUp(self: Cold, slot: Int, dL: Int) {
+    let w = self.worker!!;
+    self.wdl.set(slot, null);
+    self.wtry.set(slot, null);
+    let po = self.positions.get(slot);
+    if (po == null) {
+        return;
+    }
+    let p = po!!;
+    p.reserved = max(0, p.reserved - dL);
+    self.positions.set(slot, p);
+    self.epoch += 1;
+    let x = 0;
+    try {
+        let ov = self.oracleView();
+        let t = ov.ready ? ov.twapTick : ov.spotTick;
+        let sT = sqrtAt(t);
+        let aT = amountsForLiquidity(t, sT, p.tL, p.tU, dL, false);
+        let aS = amountsForLiquidity(ov.spotTick, ov.spotSqrtP, p.tL, p.tU, dL, false);
+        let vT = valueOf(aT.a, aT.b, priceQ64(sT));
+        let vS = valueOf(aS.a, aS.b, priceQ64(ov.spotSqrtP));
+        let nT = self.navAt(t, sT) - vT;
+        let nS = self.navAt(ov.spotTick, ov.spotSqrtP) - vS;
+        if (nT > 0 && nS > 0) {
+            x = min(mulDiv(vT, self.supply, nT), mulDiv(vS, self.supply, nS));
+        }
+    } catch (e) {
+        x = 0;
+    }
+    if (x <= 0) {
+        x = mulDiv(w.shares, dL, max(1, p.L));     // no usable price: the liquidity share of this slot
+    }
+    self.spend(C_WORKER, SHARE_MINT_VALUE);
+    self.mintShares(w.recipient, x, SHARE_MINT_VALUE, w.recipient);
+    emit(WithdrawFailedEvent { recipient: w.recipient, slot, dL, shares: x }.toCell());
+}
+
 extends mutates fun workerOpDone(self: Cold, kind: Int, slot: Int, ok: Bool) {
     if (self.worker == null) {
         return;
@@ -902,10 +998,15 @@ extends mutates fun workerOpDone(self: Cold, kind: Int, slot: Int, ok: Bool) {
     if (kind == K_COLLECT && w.stage == W_COLLECT) {
         w.pending = max(0, w.pending - 1);
         self.worker = w;
-    } else if (kind == K_UDEC && ok) {
-        self.wdl.set(slot, null);
+    } else if (kind == K_UDEC && self.wdl.get(slot) != null) {
+        if (ok) {
+            self.wdl.set(slot, null);
+            self.wtry.set(slot, null);
+        } else {
+            let t = self.wtry.get(slot);
+            self.wtry.set(slot, (t == null ? 0 : t!!) + 1);
+        }
     }
-    self.workerKick();
 }
 
 // ---------------------------------------------------------------------------
@@ -914,15 +1015,16 @@ extends mutates fun workerOpDone(self: Cold, kind: Int, slot: Int, ok: Bool) {
 
 extends mutates fun rRebalance(self: Cold, msg: Rebalance) {
     let ctx = context();
-    let keeper = self.cfgGet().keeper;
-    require(keeper == null || ctx.sender == keeper!!, "Not keeper");
+    // audit L-2: the keeper or the admin, never anyone (a null keeper means admin only).
+    let cfg = self.cfgGet();
+    require(ctx.sender == cfg.admin || (cfg.keeper != null && ctx.sender == cfg.keeper!!), "Not keeper");
     require(self.phase == PHASE_IDLE && self.worker == null && !self.anyBusy() && !self.anyUnresolved(), "Busy");
     require(ctx.value >= REBALANCE_GAS, "Insufficient TON attached");
     require(now() >= self.lastRebalance + MIN_REBALANCE_INTERVAL, "Too soon");
     self.phase = PHASE_REB;
     self.epoch += 1;
     self.reb = Reb { step: STEP_OBSERVE, startedAt: now(), budget: ctx.value, payer: ctx.sender, round: 0, need: 0, twap: 0,
-                     since: self.seq + 1 };
+                     since: self.seq + 1, spot: 0 };
     self.gasCtx = C_REB;
     emit(RebalanceEvent { stage: 1, code: 0, twapTick: 0, spotTick: self.orc.spotTick }.toCell());
     self.rebObserve(false);
@@ -967,11 +1069,13 @@ extends mutates fun rebObserved(self: Cold) {
     }
     let r = self.reb!!;
     r.twap = ov.twapTick;
+    r.spot = ov.spotTick;
     r.step = STEP_CLOSE;
     self.reb = r;
-    foreach (slot, p in self.positions) {
+    let ps = self.positions;
+    foreach (slot, p in ps) {
         if (p.L > 0) {
-            self.sendPosOp(K_CLOSE, C_REB, slot, p.L, myAddress());
+            self.sendPosOp(K_CLOSE, C_REB, slot, p.L, null, 0);
         }
     }
     self.pump();
@@ -1001,7 +1105,7 @@ extends mutates fun pump(self: Cold) {
         r.step = STEP_MINT;
         self.reb = r;
         if (self.phase == PHASE_REB) {
-            self.doMints(r.twap);
+            self.doMints(r.twap, r.spot);
             emit(RebalanceEvent { stage: 2, code: 0, twapTick: r.twap, spotTick: self.orc.spotTick }.toCell());
         }
     }
@@ -1043,15 +1147,20 @@ extends mutates fun rAbortRebalance(self: Cold, msg: AbortRebalance) {
 }
 
 // New ranges around the TWAP tick t: base = the largest balanced pair, limit = the leftover token,
-// single-sided, just beyond the deviation band. Both carry the DEX price band TWAP ± maxDeviation.
-extends mutates fun doMints(self: Cold, t: Int) {
+// single-sided, just beyond the deviation band. Both carry a DEX price band (enforced by the Pool
+// when the mint executes): spot ± maxDeviation/MINT_BAND_DIV around the rebalance's own observed
+// spot, inside TWAP ± maxDeviation. Between the closes and the mints the vault's liquidity is out
+// of the pool, so the price can be moved cheaply; the band bounds how far (audit L-3). A mint
+// outside it is refused by the DEX (refunded to idle), never executed at a moved price.
+extends mutates fun doMints(self: Cold, t: Int, spot: Int) {
     let s = self.spacing;
     let st = self.strategy;
     let dev = st.maxDeviation;
     let minU = minUsable(s);
     let maxU = maxUsable(s);
-    let sMin = sqrtAt(max(MIN_TICK, t - dev));
-    let sMax = sqrtAt(min(MAX_TICK, t + dev));
+    let tol = max(1, dev / MINT_BAND_DIV);
+    let sMin = sqrtAt(max(max(MIN_TICK, t - dev), spot - tol));
+    let sMax = sqrtAt(min(min(MAX_TICK, t + dev), spot + tol));
     let sT = sqrtAt(t);
     let x0 = self.idle0;
     let x1 = self.idle1;
@@ -1149,7 +1258,7 @@ extends mutates fun sendMint(self: Cold, slot: Int, tL: Int, tU: Int, a0: Int, a
     self.epoch += 1;
     self.ops.set(q, Op {
         kind: K_MINT, ctx: ctxId, slot, index: 0, done: false, ok: false, dL: minL, a0, a1, r0: a0, r1: a1,
-        f0: 0, f1: 0, tL, tU, user: null, retries: 0,
+        f0: 0, f1: 0, tL, tU, user: null, retries: 0, at: now(), g: 0, u0: 0, u1: 0, ref: 0,
     });
     return true;
 }
@@ -1187,15 +1296,19 @@ extends mutates fun rMintReceipt(self: Cold, m: MintReceipt) {
     }
     self.ops.set(q, o);
     self.maybeRemove(q);
-    self.pump();
+    self.afterOp();
 }
 
-extends mutates fun sendPosOp(self: Cold, kind: Int, ctxId: Int, slot: Int, dL: Int, recipient: Address): Bool {
+// A PositionDecreaseNotify on one of our NFTs. The DEX always pays the VAULT (recipient = vault):
+// a user decrease is forwarded to the withdrawer by the vault (audit H-1, H-2), so the Pool can
+// never refuse it for its recipient and never pays a withdrawer the position's other fees.
+extends mutates fun sendPosOp(self: Cold, kind: Int, ctxId: Int, slot: Int, dL: Int, user: Address?, ref: Int): Bool {
     let po = self.positions.get(slot);
     if (po == null || po!!.busy != 0) {
         return false;
     }
-    if (!self.spend(ctxId, POS_OP_VALUE)) {
+    let g = kind == K_UDEC ? USER_PAY_GAS : 0;
+    if (!self.spend(ctxId, POS_OP_VALUE + g)) {
         return false;
     }
     let p = po!!;
@@ -1204,15 +1317,16 @@ extends mutates fun sendPosOp(self: Cold, kind: Int, ctxId: Int, slot: Int, dL: 
         to: p.addr, value: POS_OP_VALUE, mode: SendPayGasSeparately, bounce: true,
         body: PositionDecreaseNotify {
             queryId: q, liquidityDelta: dL, amount0Min: 0, amount1Min: 0,
-            deadline: now() + OP_DEADLINE, recipient,
+            deadline: now() + OP_DEADLINE, recipient: myAddress(),
         }.toCell(),
     });
     p.busy = q;
     self.positions.set(slot, p);
     self.epoch += 1;
+    self.opGas += g;
     self.ops.set(q, Op {
         kind, ctx: ctxId, slot, index: p.index, done: false, ok: false, dL, a0: 0, a1: 0, r0: 0, r1: 0,
-        f0: 0, f1: 0, tL: p.tL, tU: p.tU, user: recipient, retries: 0,
+        f0: 0, f1: 0, tL: p.tL, tU: p.tU, user, retries: 0, at: now(), g, u0: 0, u1: 0, ref,
     });
     return true;
 }
@@ -1226,7 +1340,7 @@ extends mutates fun rBurnReceiptIn(self: Cold, m: BurnReceipt): Bool {
         return false;
     }
     let o = opt!!;
-    if (o.done || o.index != m.index || o.kind < K_CLOSE || o.kind > K_UDEC) {
+    if (o.done || o.index != m.index || o.kind < K_CLOSE || o.kind > K_SYNC) {
         return false;
     }
     let slot0 = self.slotOf(o.index);
@@ -1241,14 +1355,28 @@ extends mutates fun rBurnReceiptIn(self: Cold, m: BurnReceipt): Bool {
     self.freePos(o.index, q);
     o.done = true;
     o.ok = m.ok;
+    let staleQ = 0;
+    let staleRan = false;
     if (m.ok) {
         let slot = self.slotOf(o.index);
         if (slot != NO_SLOT) {
             let p = self.positions.get(slot)!!;
-            p.L = m.liquidity;          // the Position's own record
             if (o.kind == K_UDEC) {
                 p.reserved = max(0, p.reserved - m.liquidityDelta);
             }
+            if (o.kind == K_SYNC) {
+                // Re-sync after a lost receipt: nothing else touched this NFT since the lost op, so its
+                // liquidity tells whether that op ran (Recover, audit M-1).
+                let so = self.ops.get(o.ref);
+                if (so != null && !so!!.done) {
+                    staleQ = o.ref;
+                    staleRan = so!!.dL > 0 && p.L - m.liquidity == so!!.dL;
+                    if (staleRan && so!!.kind == K_UDEC) {
+                        p.reserved = max(0, p.reserved - so!!.dL);
+                    }
+                }
+            }
+            p.L = m.liquidity;          // the Position's own record
             p.uf0 = 0;                  // the fee checkpoint moved: the last reading is void
             p.uf1 = 0;
             p.oRound = 0;
@@ -1262,13 +1390,59 @@ extends mutates fun rBurnReceiptIn(self: Cold, m: BurnReceipt): Bool {
         }
     }
     self.ops.set(q, o);
-    if (m.ok && (o.kind == K_CLOSE || o.kind == K_COLLECT)) {
+    if (m.ok) {
         let bps = self.strategy.perfFeeBps;
-        self.expectOp(q, m.amount0 + m.fees0, m.fees0 * bps / BPS, m.amount1 + m.fees1, m.fees1 * bps / BPS);
+        let perf0 = m.fees0 * bps / BPS;
+        let perf1 = m.fees1 * bps / BPS;
+        self.expectOp(q, m.amount0 + m.fees0, perf0, m.amount1 + m.fees1, perf1);
+        if (o.kind == K_UDEC) {
+            // The withdrawer's principal, plus his liquidity's share of the fees this decrease
+            // collected (net of the performance fee); the rest of the fees stays with the holders.
+            let lb = m.liquidity + m.liquidityDelta;
+            let u0 = m.amount0;
+            let u1 = m.amount1;
+            if (lb > 0) {
+                u0 += mulDiv(m.fees0 - perf0, m.liquidityDelta, lb);
+                u1 += mulDiv(m.fees1 - perf1, m.liquidityDelta, lb);
+            }
+            self.oweUser(q, u0, u1);
+        }
     }
     self.maybeRemove(q);
+    if (staleQ != 0) {
+        self.resolveStale(staleQ, staleRan);
+    }
     self.opDone(o.ctx, o.kind, o.slot, o.ok);
     return true;
+}
+
+// A position op whose receipt was lost, resolved by its re-sync: if it ran, what arrived for it is
+// its result (for a user decrease: all of it is forwarded to the withdrawer); if not, it failed.
+extends mutates fun resolveStale(self: Cold, q: Int, ran: Bool) {
+    let s = self.ops.get(q)!!;
+    s.done = true;
+    s.ok = ran;
+    self.ops.set(q, s);
+    emit(RecoverEvent { kind: 3, queryId: q }.toCell());
+    if (ran) {
+        let a0 = max(0, -s.r0);
+        let a1 = max(0, -s.r1);
+        self.expectOp(q, a0, 0, a1, 0);
+        if (s.kind == K_UDEC) {
+            self.oweUser(q, a0, a1);
+        }
+    }
+    self.maybeRemove(q);
+    self.opDone(s.ctx, s.kind, s.slot, ran);
+}
+
+extends mutates fun oweUser(self: Cold, q: Int, u0: Int, u1: Int) {
+    let o = self.ops.get(q)!!;
+    o.u0 += u0;
+    o.u1 += u1;
+    self.due0 += u0;
+    self.due1 += u1;
+    self.ops.set(q, o);
 }
 
 // The Position refused the op (bounced: not owner / busy / not deployed yet): nothing happened.
@@ -1290,9 +1464,15 @@ extends mutates fun bPositionDecreaseNotify(self: Cold, q: Int) {
 extends mutates fun opDone(self: Cold, ctxId: Int, kind: Int, slot: Int, ok: Bool) {
     if (ctxId == C_WORKER) {
         self.workerOpDone(kind, slot, ok);
-    } else if (ctxId == C_REB) {
-        self.pump();
     }
+    self.afterOp();
+}
+
+// After any op result: push the rebalance and the withdrawal worker (a position freed by a late op
+// of an aborted rebalance lets the queue start, audit L-1).
+extends mutates fun afterOp(self: Cold) {
+    self.pump();
+    self.workerKick();
 }
 
 // A receipt says `gross` (perf fee `perf` inside) is on its way, per token. Part of it may already
@@ -1359,20 +1539,67 @@ extends mutates fun arrived1(self: Cold, q: Int, amount: Int) {
 }
 
 // An op is forgotten once its result is in and everything it announced has arrived. More than
-// announced (r < 0: someone sent extra with our queryId) is surplus for the holders.
+// announced (r < 0: someone sent extra with our queryId) is surplus for the holders. A user
+// decrease forwards each leg to the withdrawer as soon as that leg has arrived.
 extends mutates fun maybeRemove(self: Cold, q: Int) {
     let opt = self.ops.get(q);
     if (opt == null) {
         return;
     }
     let o = opt!!;
-    if (!o.done || o.r0 > 0 || o.r1 > 0) {
+    if (!o.done) {
         return;
     }
+    if (o.r0 <= 0 && o.u0 > 0) {
+        let a = min(o.u0, self.idle0);
+        self.idle0 -= a;
+        self.due0 -= min(self.due0, o.u0);
+        o.u0 = 0;
+        let c = min(o.g, FWD_EST);
+        o.g -= c;
+        self.opGas -= min(self.opGas, c);
+        if (a > 0) {
+            self.sendGram(o.user!!, a, PAYOUT_WITHDRAW, q);
+        }
+    }
+    if (o.r1 <= 0 && o.u1 > 0) {
+        let a = min(o.u1, self.idle1);
+        self.idle1 -= a;
+        self.due1 -= min(self.due1, o.u1);
+        o.u1 = 0;
+        // This transaction's compute (and the Gram leg's fee if still to come) stays; the rest of the
+        // held gas rides with the transfer and its excess goes to the withdrawer.
+        let keep = FWD_EST + getComputeFee(gasConsumed() + 40000, false) + (o.u0 > 0 ? FWD_EST : 0);
+        let v = max(JETTON_OUT_VALUE, o.g - keep);
+        let c = min(o.g, v + FWD_EST);
+        o.g -= c;
+        self.opGas -= min(self.opGas, c);
+        if (a > 0) {
+            self.sendUsdt(self.nextQ(K_PAYOUT), a, o.user!!, v, 0, null, o.user!!);
+        }
+    }
+    if (o.r0 > 0 || o.r1 > 0) {
+        self.ops.set(q, o);
+        return;
+    }
+    self.dropOp(q, o);
+}
+
+// Remove an op (its expectations written off: exp, owe and due), releasing its held gas to its
+// budget (or the free buffer).
+extends mutates fun dropOp(self: Cold, q: Int, o: Op) {
     self.exp0 -= o.r0;
     self.exp1 -= o.r1;
     self.owe0 -= min(self.owe0, o.f0);
     self.owe1 -= min(self.owe1, o.f1);
+    self.due0 -= min(self.due0, o.u0);
+    self.due1 -= min(self.due1, o.u1);
+    self.opGas -= min(self.opGas, o.g);
+    if (o.g > 0) {
+        let gc = self.gasCtx;
+        self.credit(o.ctx, o.g);
+        self.gasCtx = gc;
+    }
     self.ops.set(q, null);
 }
 
@@ -1445,7 +1672,17 @@ extends mutates fun rJettonExcesses(self: Cold, msg: JettonExcesses) {
     // is too little the value simply stays in the free buffer.
     let opt = self.ops.get(msg.queryId);
     if (opt != null) {
-        self.credit(opt!!.ctx, context().value);
+        let o = opt!!;
+        let v = context().value;
+        if (o.kind == K_MINT && !o.ok && o.r0 > 0 && v >= o.r0 + MINT_FWD / 2) {
+            // A Router-level refusal of our notifying jetton mint (deadline, gas, ...): the USDT is
+            // refunded notified, the Gram leg comes back inside our wallet's excess. Only a value this
+            // large can be it (a normal excess is < MINT_WALLET_VALUE); it is real value either way.
+            self.credit(o.ctx, v - o.r0);
+            self.arrived0(msg.queryId, o.r0);
+        } else {
+            self.credit(o.ctx, v);
+        }
     }
 }
 
@@ -1455,16 +1692,10 @@ extends mutates fun bJettonTransfer(self: Cold, queryId: Int, amount: Int) {
     let kind = q >> 56;
     if (kind == K_MINT) {
         let opt = self.ops.get(q);
-        if (opt != null && !opt!!.done) {
-            let o = opt!!;
+        if (opt != null && !opt!!.ok) {
             // Our wallet refused the mint transfer: both legs are back (the Gram rides in the value).
-            self.idle0 += o.a0;
-            self.idle1 += o.a1;
-            self.exp0 -= o.r0;
-            self.exp1 -= o.r1;
-            self.credit(o.ctx, ctx.value - o.a0);
-            self.ops.set(q, null);
-            self.pump();
+            // Also for a mint Recover already marked failed: what is still expected is what came back.
+            self.mintLegsBack(q, opt!!, ctx.value, true);
         }
         return;
     }
@@ -1478,15 +1709,27 @@ extends mutates fun bJettonTransfer(self: Cold, queryId: Int, amount: Int) {
 
 extends mutates fun bMintNativeNotify(self: Cold, queryId: Int) {
     let opt = self.ops.get(queryId);
-    if (opt == null || opt!!.done) {
+    if (opt == null || opt!!.ok) {
         return;
     }
-    let o = opt!!;
-    self.idle0 += o.a0;
-    self.exp0 -= o.r0;
-    self.credit(o.ctx, context().value - o.a0);
-    self.ops.set(queryId, null);
-    self.pump();
+    self.mintLegsBack(queryId, opt!!, context().value, false);
+}
+
+// A mint that definitely failed before reaching the Pool (bounced): the legs still expected are
+// back, the op is removed.
+extends mutates fun mintLegsBack(self: Cold, q: Int, o: Op, value: Int, usdt: Bool) {
+    let a0 = min(max(0, o.r0), value);
+    let a1 = usdt ? max(0, o.r1) : 0;
+    self.idle0 += a0;
+    self.idle1 += a1;
+    o.r0 -= a0;
+    o.r1 -= a1;
+    self.exp0 -= a0;
+    self.exp1 -= a1;
+    self.credit(o.ctx, value - a0);
+    o.done = true;
+    self.dropOp(q, o);
+    self.afterOp();
 }
 
 extends mutates fun bJettonTransferInternal(self: Cold, amount: Int) {
@@ -1515,6 +1758,90 @@ extends mutates fun rPoke(self: Cold, msg: Poke) {
     }
     self.workerKick();
     self.pump();
+}
+
+// Anyone, paid (audit M-1): resolve what a lost DEX reply left pending, after a delay at which
+// nothing the vault sent can still execute. Each item ends in a consistent state:
+//  - a deposit whose observation never came back (DEP_TIMEOUT): both legs refunded;
+//  - a mint without receipt (RECOVERY_DELAY > its DEX deadline): written off (a late refund is
+//    surplus for the holders);
+//  - a position op without receipt (RECOVERY_DELAY): the NFT is re-read with a fresh collect
+//    (K_SYNC); its receipt tells whether the lost op ran (rBurnReceiptIn / resolveStale);
+//  - a finished op whose payout never arrived (RECOVERY_DELAY): written off (exp, owe, due).
+extends mutates fun rRecover(self: Cold, msg: Recover) {
+    let ctx = context();
+    require(ctx.value >= RECOVER_GAS, "Insufficient TON attached");
+    let n = 0;
+    let spent = 0;
+    let dm = self.deps;
+    foreach (round, d in dm) {
+        if (n < RECOVER_MAX && now() >= d.at + DEP_TIMEOUT) {
+            self.deps.set(round, null);
+            self.pendG -= min(self.pendG, d.a0 + d.gas);
+            self.pendU -= min(self.pendU, d.a1);
+            self.depositRefund(d, max(0, d.gas - FWD_EST), D_TIMEOUT);
+            emit(RecoverEvent { kind: 1, queryId: round }.toCell());
+            n += 1;
+        }
+    }
+    let om = self.ops;
+    foreach (q, o0 in om) {
+        let oo = self.ops.get(q);         // an earlier item may have resolved it already
+        if (n < RECOVER_MAX && oo != null && now() >= oo!!.at + RECOVERY_DELAY) {
+            let o = oo!!;
+            if (o.done) {
+                // its result is in but (part of) its payout never arrived
+                self.dropOp(q, o);
+                emit(RecoverEvent { kind: 4, queryId: q }.toCell());
+                n += 1;
+            } else if (o.kind == K_MINT) {
+                // Past its DEX deadline it can no longer execute: it failed. The record stays so a late
+                // refund is still matched; whatever never arrives is written off RECOVERY_DELAY later.
+                o.done = true;
+                o.ok = false;
+                o.at = now();
+                self.ops.set(q, o);
+                emit(RecoverEvent { kind: 2, queryId: q }.toCell());
+                self.maybeRemove(q);
+                self.opDone(o.ctx, o.kind, o.slot, false);
+                n += 1;
+            } else if (o.kind == K_SYNC) {
+                // a re-sync that itself got no answer: drop it; the lost op can be re-synced again
+                self.freePos(o.index, q);
+                self.dropOp(q, o);
+                emit(RecoverEvent { kind: 5, queryId: q }.toCell());
+                n += 1;
+            } else {
+                let slot = self.slotOf(o.index);
+                if (slot == NO_SLOT) {
+                    o.done = true;
+                    o.ok = false;
+                    self.ops.set(q, o);
+                    self.maybeRemove(q);
+                    self.opDone(o.ctx, o.kind, o.slot, false);
+                    n += 1;
+                } else {
+                    let p = self.positions.get(slot)!!;
+                    if (p.busy == q || p.busy == 0) {
+                        p.busy = 0;
+                        self.positions.set(slot, p);
+                        if (self.sendPosOp(K_SYNC, C_NONE, slot, 0, null, q)) {
+                            spent += POS_OP_VALUE + FWD_EST;
+                            n += 1;
+                        } else {
+                            p.busy = q;
+                            self.positions.set(slot, p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    require(n > 0, "Nothing to recover");
+    self.epoch += 1;
+    self.gasCtx = 0;
+    self.refundGas(ctx.sender, min(ctx.value - spent - HANDLER_EST, self.freeBalance()), msg.queryId);
+    self.afterOp();
 }
 
 // ---------------------------------------------------------------------------
@@ -1606,7 +1933,7 @@ extends mutates fun nextQ(self: Cold, kind: Int): Int {
 }
 
 extends mutates fun heldGas(self: Cold): Int {
-    let h = self.queueGas + self.pendG;
+    let h = self.queueGas + self.pendG + self.opGas;
     if (self.reb != null) {
         h += self.reb!!.budget;
     }
@@ -1776,6 +2103,7 @@ extends mutates fun g_get_vault_data(self: Cold): VaultData {
         depositsPaused: self.depositsPaused, strategy: self.strategy, lastRebalance: self.lastRebalance,
         queueLength: self.qTail - self.qHead, workerActive: self.worker != null,
         rebStep: self.reb == null ? 0 : self.reb!!.step, opCount: n, depCount: nd, epoch: self.epoch,
+        due0: self.due0, due1: self.due1, opGas: self.opGas,
     };
 }
 
@@ -1784,8 +2112,8 @@ extends mutates fun g_get_nav(self: Cold): NavView {
     let t = ov.ready ? ov.twapTick : ov.spotTick;
     let sT = sqrtAt(t);
     let bps = self.strategy.perfFeeBps;
-    let tot0 = self.idle0 + self.exp0 - self.owe0;
-    let tot1 = self.idle1 + self.exp1 - self.owe1;
+    let tot0 = self.idle0 + self.exp0 - self.owe0 - self.due0;
+    let tot1 = self.idle1 + self.exp1 - self.owe1 - self.due1;
     foreach (slot, pos in self.positions) {
         let l = pos.L - pos.reserved;
         if (l > 0) {
@@ -1859,6 +2187,10 @@ contract Vault {
             wdl: emptyMap(),
             lastRebalance: 0,
             baseCenter: 0,
+            due0: 0,
+            due1: 0,
+            opGas: 0,
+            wtry: emptyMap(),
         }.toCell();
     }
 
@@ -2046,6 +2378,14 @@ contract Vault {
         if (c.usdtWallet != null) {
             self.wallet = c.usdtWallet!!;
         }
+        self.syncPosKeys(c.positions);
+        self.cold = c.toCell();
+    }
+
+    receive(msg: Recover) {
+        let c = Cold.fromCell(self.cold);
+        c.rRecover(msg);
+        c.chargeGas();
         self.syncPosKeys(c.positions);
         self.cold = c.toCell();
     }

@@ -333,6 +333,24 @@ describe('position: fees, decrease / collect replies, concurrency, NFT', () => {
         await expectPoolEquals(pool, sim);
     });
 
+    it('recipient == the Pool itself is refused (BAD_RECIPIENT 215): the payout is never sent to the pool and lost (round-1 info)', async () => {
+        const pd = await pA.getGetPositionData();
+        const sim = await simOf(pool);
+        const st = await pool.getGetPoolState();
+        const before = await d.gram(d.alice.address);
+        const res = await d.decrease(pA, d.alice, pd.liquidity, { recipient: pool.address });
+        expectNoFailures(res);
+        expect(refundCodes(res)).toEqual([215]);
+        expect(modifyEvents(res)).toEqual([]);
+        // No payout from the pool to anyone but the Position's sync reply; the owner gets the gas back.
+        expect(gramPayouts(res).length).toBe(0);
+        const after = await pA.getGetPositionData();
+        expect([after.liquidity, after.busy]).toEqual([pd.liquidity, false]);
+        expect((await pool.getGetPoolState()).reserve0).toBe(st.reserve0);
+        expect(await d.gram(d.alice.address)).toBeGreaterThan(before - toNano('0.05'));
+        await expectPoolEquals(pool, sim);
+    });
+
     it('decrease at exactly DECREASE_GAS succeeds (both payout legs); below it the Position refuses', async () => {
         const pd = await pA.getGetPositionData();
         let res: any = await d.decrease(pA, d.alice, pd.liquidity / 2n, { value: toNano('0.25') - 1n });

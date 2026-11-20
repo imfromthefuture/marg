@@ -103,10 +103,12 @@ describe('rebalance', () => {
         expect(refusedWith(ok)).toEqual([]);
         const soon = await f.rebalance(f.keeper);
         expect(soon.transactions).toHaveTransaction({ to: f.vault.address, success: false, exitCode: errOf('Too soon') });
-        // back to permissionless
+        // audit L-2: no keeper means admin only (never permissionless: no Rebalance spam)
         expectNoFailures(await f.vault.send(f.admin.getSender(), { value: toNano('0.05') }, { $$type: 'SetKeeper', queryId: 1n, keeper: null }));
         await f.wait(86400);
-        const r2 = await f.rebalance(f.alice);
+        const spam = await f.rebalance(f.alice);
+        expect(spam.transactions).toHaveTransaction({ to: f.vault.address, success: false, exitCode: errOf('Not keeper') });
+        const r2 = await f.rebalance(f.admin);
         expectNoFailures(r2);
         expect(refusedWith(r2)).toEqual([]);
         await f.expectPositionsMatchNfts();

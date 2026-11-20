@@ -12,7 +12,7 @@ contract Router {
     treasury: Address;
     creationPaused: Bool;
     presets: map<Int as uint16, FeePreset>;     // tickSpacing -> preset, ADD-ONLY
-    platformBps: Int as uint16;                 // PLATFORM FEE of launch keys, admin-set in [0, PLATFORM_FEE_CAP_BPS]
+    platformBps: Int as uint16;                 // PLATFORM FEE of launch keys, admin-set in [PLATFORM_FEE_MIN_BPS, PLATFORM_FEE_CAP_BPS]
 
     init(admin: Address, treasury: Address) {
         // v3 (audit M-2): a treasury outside basechain fails every platform payout.
@@ -316,7 +316,7 @@ contract Router {
     }
 
     receive(msg: CollectProtocolFees) {
-        require(context().value >= COLLECT_GAS, "Insufficient TON attached");
+        require(context().value >= PROTOCOL_COLLECT_GAS, "Insufficient TON attached");
         self.toPool(msg.key, PoolCollectProtocol { queryId: msg.queryId, treasury: self.treasury, excessTo: sender() }.toCell());
     }
 
@@ -348,10 +348,11 @@ contract Router {
         self.refundRemaining(msg.queryId);
     }
 
-    // Any rate in [0, PLATFORM_FEE_CAP_BPS] (lower or raise again), never above the code cap.
+    // Any rate in [PLATFORM_FEE_MIN_BPS, PLATFORM_FEE_CAP_BPS] (lower or raise again), never outside the code bounds.
     receive(msg: SetPlatformFee) {
         self.requireAdmin();
         require(msg.bps <= PLATFORM_FEE_CAP_BPS, "Fee above cap");
+        require(msg.bps >= PLATFORM_FEE_MIN_BPS, "Fee below floor");
         self.platformBps = msg.bps;
         self.refundRemaining(msg.queryId);
     }
@@ -386,7 +387,7 @@ contract Router {
 
     receive(msg: WithdrawRouterExcess) {
         self.requireAdmin();
-        nativeReserve(ROUTER_MIN_STORAGE, ReserveAtMost);
+        nativeReserve(ROUTER_RENT_RESERVE, ReserveAtMost);
         message(MessageParameters {
             to: self.treasury,
             value: 0,

@@ -41,7 +41,7 @@ export function Swap() {
                 </div>
                 <p className="hint small" style={{ margin: '10px 0 0' }}>
                     New launches also carry a short anti-snipe fee that fades to zero, and tax tokens add their buy or sell tax in Gram.
-                    Large orders fill partly (at most 24 ticks per transaction) and the rest is refunded.
+                    Large orders fill partly (the app allows up to 12 tick crossings per swap) and the rest is refunded.
                 </p>
             </div>
         </div>

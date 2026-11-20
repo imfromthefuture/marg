@@ -183,7 +183,7 @@ describe('Marg direct launch v3: review fixes', () => {
             {},
             { devBuy: toNano('5') },
             { buyTaxBps: 300n, sellTaxBps: 500n, rewardsBps: 5000n, walletBps: 2000n, buybackBps: 3000n },
-            { buyTaxBps: 100n, rewardsBps: 10000n, vaultBps: 2000n, antiSnipePips: 900000n, antiSnipeDuration: 60n },
+            { buyTaxBps: 100n, rewardsBps: 9999n, buybackBps: 1n, vaultBps: 2000n, antiSnipePips: 900000n, antiSnipeDuration: 60n },
             { vaultBps: 5000n, antiSnipePips: 150000n, antiSnipeDuration: 15n },
         ];
         for (const v of variants) {
@@ -303,28 +303,33 @@ describe('Marg direct launch v3: review fixes', () => {
     // R2-L2: reward message values follow the gas price; nothing sticks
     // -----------------------------------------------------------------------
 
-    it('R2-L2: reward values are gas amounts priced by the chain config (0.026 / 0.035 Gram at 400 nanoGram/gas) and scale with it', async () => {
-        const { master } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+    it('R2-L2 (v4): reward values are gas amounts priced by the chain config (2x headroom on what a wallet sends) and scale with it', async () => {
+        const { master } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
         setGasPrice(chain, 400n);
         const v400 = await master.getGetRewardValues();
-        const fwd = v400.checkpoint - (46000n + 15000n) * 400n;                    // 2 forward fees
-        expect(v400.ack).toBe(15000n * 400n);
+        const CUSHION = toNano('0.002'), MIN = toNano('0.01');
+        // checkpoint = 2 x (master + ack compute) + the ack's rent cushion + 2 forward fees.
+        const fwd = v400.checkpoint - 2n * (58500n + 15000n) * 400n - CUSHION;      // 2 forward fees
+        expect(v400.ack).toBe(4n * 15000n * 400n + CUSHION);                       // CLAIM_ACK_HEADROOM 4
         expect(fwd).toBeGreaterThan(0n);
         expect(fwd).toBeLessThan(toNano('0.004'));
-        expect(v400.claim).toBe((16000n + 50000n + 15000n) * 400n + fwd * 3n / 2n);
-        expect(v400.sync).toBe(v400.checkpoint + 16000n * 400n);
-        expect(v400.checkpoint).toBeLessThan(toNano('0.028'));
-        expect(v400.claim).toBeLessThan(toNano('0.037'));
+        // claim = wallet compute (CLAIM_WALLET_GAS 21000) + storage reserve + 2 x claimMin (master compute + the ack (4 x its compute + cushion)
+        // + 2 forward fees) + 1 forward fee.
+        expect(v400.claim).toBe((21000n + 2n * (70000n + 4n * 15000n)) * 400n + 2n * CUSHION + MIN + fwd * 5n / 2n);
+        // sync = wallet compute + storage reserve + checkpoint + 1 forward fee (the caller's excess).
+        expect(v400.sync).toBe(v400.checkpoint + 21000n * 400n + MIN + fwd / 2n);   // CLAIM_WALLET_GAS 21000 (audit C7)
+        expect(v400.checkpoint).toBeLessThan(toNano('0.062'));
+        expect(v400.claim).toBeLessThan(toNano('0.13'));
         setGasPrice(chain, 4000n);
         const v4000 = await master.getGetRewardValues();
-        expect(v4000.ack).toBe(v400.ack * 10n);
-        expect(v4000.checkpoint - fwd).toBe((v400.checkpoint - fwd) * 10n);
-        expect(v4000.claim - fwd * 3n / 2n).toBe((v400.claim - fwd * 3n / 2n) * 10n);
+        expect(v4000.ack - CUSHION).toBe((v400.ack - CUSHION) * 10n);
+        expect(v4000.checkpoint - fwd - CUSHION).toBe((v400.checkpoint - fwd - CUSHION) * 10n);
+        expect(v4000.claim - fwd * 5n / 2n - 2n * CUSHION - MIN).toBe((v400.claim - fwd * 5n / 2n - 2n * CUSHION - MIN) * 10n);
     });
 
     for (const price of [400n, 2000n, 6000n]) {
         it(`R2-L2: at ${price} nanoGram/gas transfers checkpoint, acks are processed, inFlight returns to 0 and ClaimRewards pays`, async () => {
-            const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+            const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
             const [a, b] = holders;
             // Trades at the default price (the DEX gas constants are not the subject here).
             expectNoFailures(await buy(a, key, toNano('100')));
@@ -341,8 +346,9 @@ describe('Marg direct launch v3: review fixes', () => {
             const cps = res.transactions.filter((tx) => opOf(tx) === OPS.checkpoint);
             const acks = res.transactions.filter((tx) => opOf(tx) === OPS.ack);
             expect([cps.length, acks.length]).toEqual([2, 2]);
-            for (const tx of acks) expect(Number((tx.description as any).computePhase.gasUsed)).toBeLessThan(15000 / 2 + 1);
-            for (const tx of cps) expect(Number((tx.description as any).computePhase.gasUsed)).toBeLessThan(46000 * 2 / 3 + 1);
+            // Within the budgets (the 1.5x margins, worst case, are measured in rewards-hardening.spec.ts).
+            for (const tx of acks) expect(Number((tx.description as any).computePhase.gasUsed)).toBeLessThan(15000 / 1.5 + 1);
+            for (const tx of cps) expect(Number((tx.description as any).computePhase.gasUsed)).toBeLessThan(58500);
             expect((await wa.getGetRewardState()).inFlight).toBe(0n);
             expect((await wb.getGetRewardState()).inFlight).toBe(0n);
             expect((await master.getGetRewardsData()).totalShares).toBe(shares0);
@@ -369,7 +375,7 @@ describe('Marg direct launch v3: review fixes', () => {
     }
 
     it('R2-L2: an underfunded checkpoint / claim is refused by the master before it applies anything and bounces: the wallet undoes it', async () => {
-        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
         const [a] = holders;
         expectNoFailures(await buy(a, key, toNano('100')));
         expectNoFailures(await collect(key));
@@ -399,13 +405,14 @@ describe('Marg direct launch v3: review fixes', () => {
         expectNoFailures(c);
         expect((await wa.getGetRewardState()).inFlight).toBe(0n);
         expect((await master.getGetRewardsData()).totalShares).toBe(bal);
-        // A claim whose value no longer covers the master's side is refused there and bounced: inFlight returns to 0.
+        // A claim whose value no longer covers the master's side (price 400 -> 4000) is refused there and bounced: inFlight returns to 0.
         setGasPrice(chain, 400n);
         const it2 = await chain.sendMessageIter(internal({ from: a.address, to: wa.address, value: (await master.getGetRewardValues()).claim,
             body: beginCell().storeUint(0x4d4c0033, 32).storeUint(11, 64).endCell() }));
         const t2: BlockchainTransaction[] = [(await it2.next()).value];
         expect((await wa.getGetRewardState()).inFlight).toBe(1n);
-        setGasPrice(chain, 1200n);
+        // v4: the claim carries 2x the master's compute and a 4x ack, so a 3x rise is still applied; 10x is refused.
+        setGasPrice(chain, 4000n);
         for (let r = await it2.next(); !r.done; r = await it2.next()) t2.push(r.value);
         expect(t2.filter((tx) => dst(tx)?.equals(master.address)).map(txOk)).toEqual([false]);
         expect((await wa.getGetRewardState()).inFlight).toBe(0n);
@@ -420,8 +427,8 @@ describe('Marg direct launch v3: review fixes', () => {
     // L-2: a standard 0.05 Gram transfer of a rewards token
     // -----------------------------------------------------------------------
 
-    it('L-2: at the mainnet gas price (66.7) a 0.05 Gram transfer between tracked holders succeeds with both checkpoints; at 400 it needs ~0.1 and 0.05 is refused cleanly', async () => {
-        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+    it('L-2: at the mainnet gas price (66.7) a 0.05 Gram transfer between tracked holders succeeds with both checkpoints; at 400 it needs ~0.15 and 0.05 is refused cleanly', async () => {
+        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
         const [a, b, c] = holders;
         expectNoFailures(await buy(a, key, toNano('100')));
         expectNoFailures(await buy(b, key, toNano('20')));
@@ -435,11 +442,13 @@ describe('Marg direct launch v3: review fixes', () => {
         let bits = 0, cells = 0;
         const walk = (x: Cell) => { const h = x.hash().toString('hex'); if (seen.has(h)) return; seen.add(h); cells++; bits += x.bits.length; x.refs.forEach(walk); };
         walk(acc.state.code); walk(acc.state.data);
-        expect(cells + 3).toBeLessThanOrEqual(80);
-        expect(bits + 1100).toBeLessThanOrEqual(32000);
+        // (checked at the end, so the transfer checks below still run)
+        const initBound = [cells + 3 <= 80, bits + 1100 <= 33500, `wallet StateInit ${cells} cells / ${bits} bits (+3 / +1100 for the body) vs WALLET_INIT_CELLS 80 / WALLET_INIT_BITS 33500`] as const;
+        console.log(initBound[2]);
         for (const to of [b, c]) {                                     // an existing tracked wallet, and a brand-new one
             const need = await wa.getGetTransferFee(to.address);
-            expect(need).toBeLessThan(toNano('0.03'));
+            // v4: 2 checkpoints with 2x headroom; get_transfer_fee + the forward fees (< 0.001) stays under 0.05.
+            expect(need + toNano('0.001')).toBeLessThan(toNano('0.05'));
             const before = await jBal(master, to.address);
             const res = await transfer(master, a, to.address, 5000n, toNano('0.05'));
             expectNoFailures(res);
@@ -459,14 +468,16 @@ describe('Marg direct launch v3: review fixes', () => {
         // At 400 nanoGram/gas the same transfer needs ~0.1; 0.05 is refused by the sender's wallet before anything changes.
         setGasPrice(chain, 400n);
         const need400 = await wa.getGetTransferFee(b.address);
-        expect(need400).toBeGreaterThan(toNano('0.08'));
-        expect(need400).toBeLessThan(toNano('0.11'));
+        console.log(`L-2: get_transfer_fee at 400 nanoGram/gas: ${need400}`);
+        expect(need400).toBeGreaterThan(toNano('0.12'));
+        expect(need400).toBeLessThan(toNano('0.17'));
         const balA = await jBal(master, a.address);
         const res = await transfer(master, a, b.address, 5000n, toNano('0.05'));
         expect(res.transactions).toHaveTransaction({ to: wa.address, success: false });
         expect(await jBal(master, a.address)).toBe(balA);
         expect((await wa.getGetRewardState()).inFlight).toBe(0n);
-        expectNoFailures(await transfer(master, a, b.address, 5000n, toNano('0.12')));
+        expectNoFailures(await transfer(master, a, b.address, 5000n, need400 + toNano('0.002')));
+        expect([initBound[0], initBound[1], initBound[2]]).toEqual([true, true, initBound[2]]);
     });
 
     // -----------------------------------------------------------------------

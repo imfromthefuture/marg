@@ -25,7 +25,7 @@ const TIERS = { $$type: 'LaunchTiers' as const, low: PARAMS,
     mid: { $$type: 'LaunchParams' as const, startMcap: toNano('10000'), tickSpacing: 10n },
     high: { $$type: 'LaunchParams' as const, startMcap: toNano('30000'), tickSpacing: 10n } };
 const LAUNCH_FEE = toNano('1.5');
-const VAULT_GAS = toNano('0.12');
+const VAULT_GAS = toNano('0.13');
 const CLAIM_VALUE = toNano('0.15');
 
 function content(): Cell {
@@ -251,7 +251,7 @@ describe('Marg direct launch: creator vault', () => {
     });
 
     it('holder rewards: the vault wallet is not tracked (locked tokens do not dilute); claimed tokens are', async () => {
-        expectNoFailures(await create({ vaultBps: 4000n, vaultLock: 7n * DAY, buyTaxBps: 300n, rewardsBps: 10000n }));
+        expectNoFailures(await create({ vaultBps: 4000n, vaultLock: 7n * DAY, buyTaxBps: 300n, rewardsBps: 9999n, walletBps: 1n }));
         const { master, vault } = await opened(0n);
         const vw = await walletOf(master, vault!.address);
         expect(await vw.getGetTracked()).toBe(false);

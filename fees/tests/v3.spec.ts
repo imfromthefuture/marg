@@ -131,7 +131,7 @@ describe('fee converter v3', () => {
         const t0 = await d.gram(tre.address);
         const created = await factory.send(d.alice.getSender(), { value: await factory.getGetCreateValue(0n) }, {
             $$type: 'CreateToken', queryId: 7n, content: content(), devBuy: 0n, minDevOut: 0n, buyTaxBps: 500n, sellTaxBps: 500n, taxWallet: null,
-            rewardsBps: 10000n, walletBps: 0n, buybackBps: 0n, antiSnipePips: 0n, antiSnipeDuration: 0n,
+            rewardsBps: 9999n, walletBps: 0n, buybackBps: 1n, antiSnipePips: 0n, antiSnipeDuration: 0n,
             startMcap: tier.startMcap, tickSpacing: tier.tickSpacing, vaultBps: 0n, vaultLock: 0n, vaultVest: 0n,
         });
         expectNoFailures(created);

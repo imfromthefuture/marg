@@ -328,7 +328,7 @@ switch, `PLATFORM_FEE_ALL_GRAM_POOLS` (false; true would charge every Gram pool)
 `Pool.platformCharged()` and `Router.platformGas()` only.
 
 - **Rate.** One global `platformBps` in the Router: initially 100 (1%), the code cap
-  `PLATFORM_FEE_CAP_BPS`. The admin sets it anywhere in `[0, 100]` with `SetPlatformFee{queryId,
+  `PLATFORM_FEE_CAP_BPS`. The admin sets it anywhere in `[0, 100]` (v4: `[85, 100]`, floor PLATFORM_FEE_MIN_BPS) with `SetPlatformFee{queryId,
   bps}` (`0x4d48001d`). The Router passes the rate and the recipient (its `treasury`) in every
   `PoolSwap` / `PoolLaunch`, so a change applies to every launch pool on its next swap.
 - **Charged like the tax, on the Gram side.** Buy: `amountIn · bps / 1e4` of the Gram input,

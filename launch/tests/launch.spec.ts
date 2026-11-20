@@ -337,7 +337,7 @@ describe('Marg direct launch (factory + jetton + DEX v2)', () => {
         expect(res.transactions.filter((tx) => !txOk(tx)).length).toBe(1);
         // Protocol share (10% of every swap fee) also goes to the treasury, triggered by anyone.
         const st = await pool.getGetPoolState();
-        res = await router.send(bob.getSender(), { value: toNano('0.3') }, { $$type: 'CollectProtocolFees', queryId: 0n, key: { ...key, $$type: 'PoolKey' } });
+        res = await router.send(bob.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 0n, key: { ...key, $$type: 'PoolKey' } });
         expectNoFailures(res);
         expect(gramPayouts(res, treasury.address).filter((x) => x.reason === REASON.PROTOCOL_FEE).map((x) => x.amount)).toEqual([st.protocolFees0]);
         // The jetton is a normal TEP-74 token: bob can send it to carol.

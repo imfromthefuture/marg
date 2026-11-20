@@ -99,6 +99,14 @@ message(0x56410009) CollectFees {
     queryId: Int as uint64;
 }
 
+// Anyone, paid (audit M-1): time-based recovery of state a lost DEX reply left behind. Refunds
+// deposits whose observation never came back (after DEP_TIMEOUT), resolves position ops whose
+// receipt never came (after RECOVERY_DELAY: a fresh collect re-reads the Position's own record),
+// writes off mints and payouts that never came (after RECOVERY_DELAY). DESIGN §11.1.
+message(0x56410011) Recover {
+    queryId: Int as uint64;
+}
+
 // --- payouts ---
 
 message(0x56410012) VaultPayout {
@@ -137,7 +145,23 @@ message(0x56410074) DepositRefusedEvent {
     from: Address;
     amount0: Int as coins;
     amount1: Int as coins;
-    code: Int as uint8;             // 1 not open / paused / busy, 2 oracle, 3 below minShares, 4 changed meanwhile, 5 bad request
+    code: Int as uint8;             // 1 not open / paused / busy, 2 oracle, 3 below minShares, 4 changed meanwhile, 5 bad request, 6 timed out (Recover)
+}
+
+// A user decrease the DEX refused MAX_UDEC_TRIES times (audit H-1 terminal path): the liquidity
+// stays with the holders and the withdrawer gets `shares` new shares worth it (DESIGN §5.1).
+message(0x56410075) WithdrawFailedEvent {
+    recipient: Address;
+    slot: Int as uint8;
+    dL: Int as uint128;
+    shares: Int as coins;
+}
+
+// Recover (audit M-1): what was resolved. kind 1 deposit refunded, 2 mint written off, 3 position op
+// re-synced (collect sent), 4 payout written off, 5 stale re-sync dropped.
+message(0x56410076) RecoverEvent {
+    kind: Int as uint8;
+    queryId: Int as uint64;
 }
 
 // --- getters ---
@@ -177,8 +201,13 @@ struct Op {
     f1: Int as coins;
     tL: Int as int24;
     tU: Int as int24;
-    user: Address?;                 // decrease recipient
+    user: Address?;                 // user decrease: the withdrawer (the DEX pays the vault, the vault forwards)
     retries: Int as uint8;
+    at: Int as uint32;              // when the op was sent (Recover)
+    g: Int as coins;                // user decrease: gas held for forwarding the withdrawer's legs
+    u0: Int as coins;               // user decrease: still to forward to the withdrawer once its leg arrived
+    u1: Int as coins;
+    ref: Int as uint64;             // re-sync collect: the op whose receipt was lost
 }
 
 // Last observation of the pool (spot) and up to 3 TWAP anchors: the pool's own tickCumulative at
@@ -205,6 +234,7 @@ struct Reb {
     need: Int as uint8;             // replies of that round still missing
     twap: Int as int24;             // TWAP tick the new ranges are built around
     since: Int as uint32;           // first op sequence number of this rebalance
+    spot: Int as int24;             // spot tick of the rebalance's own observation (mint price band, audit L-3)
 }
 
 // A deposit waiting for its own observation round (keyed by round).
@@ -217,6 +247,7 @@ struct Dep {
     gas: Int as coins;
     need: Int as uint8;
     epoch: Int as uint32;
+    at: Int as uint32;              // when it was accepted (Recover after DEP_TIMEOUT)
 }
 
 struct WReq {
@@ -268,6 +299,9 @@ struct VaultData {
     opCount: Int;
     depCount: Int;
     epoch: Int;
+    due0: Int;                      // owed to withdrawers (user decreases), inside idle / exp
+    due1: Int;
+    opGas: Int;                     // gas held by ops for forwarding withdrawers' legs
 }
 
 struct OracleView {

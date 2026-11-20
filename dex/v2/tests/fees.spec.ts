@@ -3,8 +3,8 @@
 // LAUNCH_DECAY curve, the protocol share (cap, change, accrual, payout to the treasury only), and
 // quote_at(atTime) == execution at that time.
 
-import { toNano } from '@ton/core';
-import { SandboxContract } from '@ton/sandbox';
+import { Dictionary, beginCell, toNano } from '@ton/core';
+import { Blockchain, SandboxContract } from '@ton/sandbox';
 import {
     Dex, GRAM, Q96, CODES, REASON, Pool, expectNoFailures, swapEvents, gramPayouts, simOf, expectPoolEquals,
     failedAt, extCell,
@@ -12,6 +12,26 @@ import {
 import * as M from './model';
 
 jest.setTimeout(900000);
+
+// Config params 20 / 21: set the gas price to `nano` nanoGram per gas.
+function setGasPrice(chain: Blockchain, nano: bigint) {
+    const dict = Dictionary.loadDirect(Dictionary.Keys.Int(32), Dictionary.Values.Cell(), chain.config);
+    for (const id of [20, 21]) {
+        const s = dict.get(id)!.beginParse();
+        const b = beginCell();
+        let tag = s.loadUint(8);
+        if (tag === 0xd1) {
+            const limit = s.loadUintBig(64);
+            s.loadUintBig(64);
+            b.storeUint(tag, 8).storeUint(limit, 64).storeUint(limit * nano, 64);
+            tag = s.loadUint(8);
+        }
+        s.loadUintBig(64);
+        b.storeUint(tag, 8).storeUint(nano << 16n, 64).storeSlice(s);
+        dict.set(id, b.endCell());
+    }
+    chain.setConfig(beginCell().storeDictDirect(dict).endCell());
+}
 
 async function poolFullRange(d: Dex, spacing: bigint, ext: any = null, extM: M.ExtModel = M.PLAIN_EXT) {
     const pool = await d.poolOf(GRAM, d.tokA, spacing, ext);
@@ -177,7 +197,10 @@ describe('fees: protocol share, accrual and payout', () => {
         expectNoFailures(await d.mintJetton(d.jA, d.alice, toNano('1000'), GRAM, -6000n, 6000n, toNano('1000'), { sqrtPriceInit: Q96 }));
         pj = await d.poolOf(d.tokA, d.tokB, 10n, null);
         expectNoFailures(await d.mintJetton(d.jA, d.alice, toNano('1000'), d.tokB, -1000n, 1000n, 0n, { tickSpacing: 10n, viaAccount: true, sqrtPriceInit: Q96 }));
-        expectNoFailures(await d.mintJetton(d.jB, d.alice, toNano('1000'), d.tokA, -1000n, 1000n, 0n, { tickSpacing: 10n, viaAccount: true }));
+        // (audit R6A-6: both legs carry sqrtPriceInit, otherwise their MintParams differ and the mint is refunded)
+        expectNoFailures(await d.mintJetton(d.jB, d.alice, toNano('1000'), d.tokA, -1000n, 1000n, 0n, { tickSpacing: 10n, viaAccount: true, sqrtPriceInit: Q96 }));
+        expect((await pj.getGetPoolState()).initialized).toBe(true);
+        expect((await pj.getGetPoolState()).liquidity).toBeGreaterThan(0n);
         const s = await pool.getGetPoolState();
         key = { $$type: 'PoolKey', token0: s.key.token0, token1: s.key.token1, tickSpacing: s.key.tickSpacing, ext: s.key.ext };
         const sj = await pj.getGetPoolState();
@@ -220,7 +243,7 @@ describe('fees: protocol share, accrual and payout', () => {
         expect(e1.proto).toBeGreaterThan(0n);
         // Anyone triggers; the treasury gets exactly the buckets, the caller only the excess.
         const tj = await d.jBal(d.jA, d.treasury.address);
-        let res = await d.router.send(d.carol.getSender(), { value: toNano('0.2') }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
+        let res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
         expectNoFailures(res);
         expect(gramPayouts(res, d.treasury.address).map((x) => [x.reason, x.amount])).toEqual([[REASON.PROTOCOL_FEE, e1.proto]]);
         expect(await d.jBal(d.jA, d.treasury.address)).toBe(tj + e2.proto);
@@ -230,12 +253,12 @@ describe('fees: protocol share, accrual and payout', () => {
         await expectPoolEquals(pool, sim);
         await d.checkSolvency([pool]);
         // A second collect pays nothing (only the excess goes back to the caller).
-        res = await d.router.send(d.carol.getSender(), { value: toNano('0.2') }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
+        res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
         expectNoFailures(res);
         expect(gramPayouts(res, d.treasury.address)).toEqual([]);
         expect(res.transactions).toHaveTransaction({ from: pool.address, to: d.carol.address, op: 0xd53276db });
         // Too little value is refused at the Router.
-        res = await d.router.send(d.carol.getSender(), { value: toNano('0.2') - 1n }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
+        res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') - 1n }, { $$type: 'CollectProtocolFees', queryId: 2n, key });
         expect(failedAt(res, d.router.address).length).toBe(1);
     });
 
@@ -250,14 +273,52 @@ describe('fees: protocol share, accrual and payout', () => {
         await expectPoolEquals(pj, sim);
         const ta = await d.jBal(d.jA, d.treasury.address);
         const tb = await d.jBal(d.jB, d.treasury.address);
-        expectNoFailures(await d.router.send(d.bob.getSender(), { value: toNano('0.3') }, { $$type: 'CollectProtocolFees', queryId: 2n, key: keyJ }));
+        expectNoFailures(await d.router.send(d.bob.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 2n, key: keyJ }));
         // tokA's fee always comes from the tokA-in swap (e1), whichever token sorts first.
         expect(await d.jBal(d.jA, d.treasury.address)).toBe(ta + e1.proto);
         expect(await d.jBal(d.jB, d.treasury.address)).toBe(tb + e2.proto);
+        expect(e1.proto).toBeGreaterThan(0n);                     // really paid two jetton legs
+        expect(e2.proto).toBeGreaterThan(0n);
         const st = await pj.getGetPoolState();
         expect(st.protocolFees0 + st.protocolFees1).toBe(0n);
         const poolA = (await pool.getGetPoolState());
         expect(await d.routerHolds(d.tokA)).toBe(poolA.reserve1 + poolA.protocolFees1 + (aIs0 ? st.reserve0 : st.reserve1));
         void CODES;
+    });
+
+    it('jetton/jetton CollectProtocolFees at 400 nanoGram/gas with exactly PROTOCOL_COLLECT_GAS (0.35): both jetton legs paid, the caller gets the rest; 0.35 - 1 refused', async () => {
+        const snap = d.chain.snapshot();
+        const config0 = d.chain.config;
+        const aIs0 = (await pj.getGetPoolState()).key.token0.equals(d.tokA);
+        expectNoFailures(await d.swapJetton(d.jA, d.bob, toNano('25'), d.tokB, { tickSpacing: 10n }));
+        expectNoFailures(await d.swapJetton(d.jB, d.bob, toNano('40'), d.tokA, { tickSpacing: 10n }));
+        const st0 = await pj.getGetPoolState();
+        expect(st0.protocolFees0).toBeGreaterThan(0n);
+        expect(st0.protocolFees1).toBeGreaterThan(0n);
+        const feeA = aIs0 ? st0.protocolFees0 : st0.protocolFees1, feeB = aIs0 ? st0.protocolFees1 : st0.protocolFees0;
+        setGasPrice(d.chain, 400n);
+        // Refused at the Router below the minimum (nothing reaches the pool).
+        let res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') - 1n }, { $$type: 'CollectProtocolFees', queryId: 2n, key: keyJ });
+        expect(failedAt(res, d.router.address).length).toBe(1);
+        expect(res.transactions.filter((t) => t.inMessage?.info.dest?.toString() === pj.address.toString())).toEqual([]);
+        const ta = await d.jBal(d.jA, d.treasury.address), tb = await d.jBal(d.jB, d.treasury.address);
+        const c0 = await d.gram(d.carol.address);
+        res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 2n, key: keyJ });
+        expectNoFailures(res);
+        const ptx: any = res.transactions.find((t) => t.inMessage?.info.dest?.toString() === pj.address.toString())!.description;
+        expect(ptx.actionPhase?.success).toBe(true);
+        expect(await d.jBal(d.jA, d.treasury.address)).toBe(ta + feeA);
+        expect(await d.jBal(d.jB, d.treasury.address)).toBe(tb + feeB);
+        const st1 = await pj.getGetPoolState();
+        expect([st1.protocolFees0, st1.protocolFees1]).toEqual([0n, 0n]);
+        // The caller's change comes back from the pool.
+        expect(res.transactions).toHaveTransaction({ from: pj.address, to: d.carol.address, op: 0xd53276db });
+        const cost = c0 - (await d.gram(d.carol.address));
+        // eslint-disable-next-line no-console
+        console.log(`jetton/jetton CollectProtocolFees at 400 nanoGram/gas, 0.35 attached: pool gas ${ptx.computePhase?.gasUsed}, caller paid ${cost}`);
+        expect(cost).toBeLessThan(toNano('0.35'));
+        await d.checkSolvency([pj]);
+        await d.chain.loadFrom(snap);
+        d.chain.setConfig(config0);
     });
 });

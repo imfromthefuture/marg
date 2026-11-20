@@ -12,7 +12,7 @@ const PUBLIC_BASE = process.env.PUBLIC_BASE ?? '';  // e.g. https://tron.example
 const MAX_BYTES = 5 * 1024 * 1024;
 // Total size of the upload folder; new files are refused above it (default 2 GB).
 const DISK_QUOTA = Number(process.env.UPLOAD_QUOTA_BYTES ?? 2 * 1024 ** 3);
-// New bytes stored per client IP per UTC day (default 50 MB). Duplicates of stored files are free.
+// New bytes stored per client IP per UTC day (default 20 MB). Duplicates of stored files are free.
 const IP_DAILY_BYTES = Number(process.env.UPLOAD_IP_DAILY_BYTES ?? 20 * 1024 ** 2);
 // New bytes stored per UTC day by everyone together (default 150 MB): many IPs together can no
 // longer fill DISK_QUOTA in one day (audit R2-L5); it would take two weeks and is visible.

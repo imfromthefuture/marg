@@ -9,7 +9,7 @@
 
 import { BlockchainTransaction, SandboxContract, SendMessageResult, TreasuryContract } from '@ton/sandbox';
 import { Address, toNano } from '@ton/core';
-import { VaultFx, GRAM_1, USDT, PHASE, DEAD_SHARES, gramPaidTo, txOk } from './fixture';
+import { VaultFx, GRAM_1, USDT, PHASE, DEAD_SHARES, MIN_WITHDRAW_SHARES, gramPaidTo, txOk } from './fixture';
 import { gramPayouts, REASON, rng } from '../../dex/v2/tests/helpers';
 import * as M from '../../dex/v2/tests/model';
 import { priceQ64, valueOf, navAt } from './model';
@@ -95,8 +95,10 @@ describe('random invariant run', () => {
                 expect((na.nav + ROUNDING) * nb.supply).toBeGreaterThanOrEqual(nb.nav * na.supply);
             } else if (kind === 'withdraw') {
                 const bal = await f.shares(who.address);
-                if (bal === 0n) continue;
-                const s = r.next() < 0.3 ? bal : r.big(1n, bal);
+                const minW = (await f.data()).supply / 1_000_000n;
+                const lo = minW < MIN_WITHDRAW_SHARES ? (minW > 0n ? minW : 1n) : MIN_WITHDRAW_SHARES;
+                if (bal < lo) continue;
+                const s = r.next() < 0.3 ? bal : r.big(lo, bal);
                 const sn = await f.snap();
                 const split = f.modelSplit(sn, s);
                 const ps = await f.poolState();
@@ -112,9 +114,9 @@ describe('random invariant run', () => {
                 const ub = await f.usdtBal(who.address);
                 const res = await f.withdraw(who, s);
                 checkTxs(f, res, label);
-                expect(gramPaidTo(res, who.address, 1)).toBe(split.g);
-                const fromPool = gramPayouts(res, who.address).filter((g) => g.reason === REASON.POSITION_OUT).reduce((a, g) => a + g.amount, 0n);
-                expect(fromPool).toBe(p0);
+                // the vault forwards the principal it got from the Pool (audit H-1/H-2)
+                expect(gramPaidTo(res, who.address, 1)).toBe(split.g + p0);
+                expect(gramPayouts(res, who.address).filter((g) => g.reason === REASON.POSITION_OUT).length).toBe(0);
                 expect((await f.usdtBal(who.address)) - ub).toBe(split.u + p1);
                 const na = await navPerShare(f);
                 expect((na.nav + ROUNDING) * nb.supply).toBeGreaterThanOrEqual(nb.nav * na.supply);

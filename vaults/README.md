@@ -7,7 +7,8 @@ single-sided limit range. It compounds fees on every rebalance, and anyone can a
 
 This is a sandbox build. Nothing has been deployed, and the code needs an external audit before
 mainnet. `DESIGN.md` is the specification; its §14 records what changed during the build and
-every self-review finding.
+every self-review finding, and §14.7 the fixes of the internal audit's vault findings (H-1, H-2,
+M-1, L-1 to L-3 of `pitch/audit-v3-2026-11-18.md`).
 
 ## How it works on the canonical pool
 
@@ -44,10 +45,11 @@ The vault's key is the canonical plain key `{GRAM, RW(USDT), spacing, ext = null
 | Open (admin, once) | USDT transfer with `OpenPayload{gramAmount, sqrtPriceInitX96}` | Observes the pool: mints the first base range at the pool price (which must be within `maxDeviation` of the admin's), or initializes the pool at the admin's price if nobody has. Mints `DEAD_SHARES` plus the seed shares (≥ 10 USDT of value). |
 | Deposit Gram | `DepositNative{amount, minShares, receiver?}`, value ≥ amount + 0.35 | Accepted when the vault is quiet, then priced on its own fresh observation; a refusal refunds. |
 | Deposit USDT (+ Gram) | USDT transfer, `forwardTonAmount ≥ gram + 0.35`, `DepositPayload{gramAmount, minShares, receiver?}` | Same; a refusal refunds both legs. |
-| Withdraw | `JettonBurn` on your share wallet, value ≥ 1.6 (most is refunded) | FIFO queue. The positions' fees are collected first; you then get `shares/supply` of the idle Gram and USDT, and the same fraction of every position's liquidity straight from the Pool. A refusal restores the shares and the Gram. |
-| Rebalance (keeper, or anyone if no keeper) | `Rebalance{}`, value ≥ 3.5 (most is refunded) | Checked on its own observation (TWAP ready, deviation, needed), then closes all positions, settles, mints base + limit around the TWAP. A refusal is a `RebalanceEvent{stage 5, code}` and a refund. |
+| Withdraw | `JettonBurn` on your share wallet, value ≥ 1.8 (most is refunded), at least min(0.1 share, supply/10⁶) | FIFO queue (64). The positions' fees are collected first; you then get `shares/supply` of the idle Gram and USDT, and the same fraction of every position's liquidity: the Pool pays it to the vault, which forwards the principal plus your liquidity's share of the fees earned meanwhile. The recipient must be a basechain address other than the vault, Router, Pool, USDT master and the two DEX-side USDT wallets. A refusal restores the shares and the Gram. |
+| Rebalance (keeper; admin if no keeper) | `Rebalance{}`, value ≥ 3.5 (most is refunded) | Checked on its own observation (TWAP ready, deviation, needed), then closes all positions, settles, mints base + limit around the TWAP inside the price band spot ± maxDeviation/4. A refusal is a `RebalanceEvent{stage 5, code}` and a refund. |
 | Refresh the oracle / unstick (anyone, paid) | `Poke` | An observation (TWAP anchor); proceeds a withdrawal whose fee payout is late; tops up a running budget. |
-| Abort a stalled rebalance (anyone) | `AbortRebalance` after 30 min | Late messages still reconcile. |
+| Abort a stalled rebalance (anyone) | `AbortRebalance` after 30 min | Late messages still reconcile; queued withdrawals start as soon as the positions are free. |
+| Recover from a lost DEX reply (anyone, paid) | `Recover`, value ≥ 0.5 | A deposit whose observation never came back is refunded after 10 min. After 25 h (past every DEX deadline of the vault): a position op without receipt is resolved by re-reading the NFT with a fresh collect, a mint without receipt is marked failed (a late refund is still matched), a payout that never arrived is written off. |
 | Pay the performance fee (anyone) | `CollectFees` | Pays the treasury only. |
 
 **Pricing.** A deposit gets `min(quote at the TWAP, quote at the spot)` on an observation the vault
@@ -70,7 +72,7 @@ prepaid gas and run when the rebalance ends (worst case: the 30-minute abort tim
 ```sh
 cd <repo root>
 npx tact --config vaults/tact.config.json     # Vault, VaultWallet, VaultMathHarness -> vaults/build
-npx jest vaults/tests                         # 43 tests, 10 suites (~5 min)
+npx jest vaults/tests -i                      # 55 tests, 14 suites (~9 min)
 PRINT_GAS=1 npx jest vaults/tests/gas.spec.ts # gas table
 VAULT_SEED=7 npx jest vaults/tests/invariant.spec.ts   # another random seed
 ```
@@ -89,24 +91,35 @@ The tests use the **real** dex/v2 Router, Pool and Position, and dex/v2's mock j
 | `async` | A user decrease that fails at the Pool (retried, paid once); payouts overtaking their receipt (counted once, perf fee once); a never-arriving fee payout (Poke proceeds); deposits priced at min(TWAP, spot). |
 | `multi` | Two vaults on one key (independent positions, deposits, withdrawals, fees and rebalances); a plain swapper pays no hook fee and never touches a vault. |
 | `invariant` | 220 seeded random operations (deposits, withdrawals, swaps, rebalances, DEX donations, pokes, fee collections, time jumps). After each: solvency, NFT = vault liquidity and checkpoint, nothing in flight, exact shares and payouts against the model, NAV per share non-decreasing for the remaining holders. Finally everyone exits. |
+| `audit4-recipient`, `audit4-feeskim` | The audit's PoCs as regressions: a Router / Pool / DEX-wallet recipient is refused at the request and the vault keeps working (H-1); a dust withdrawal gets exactly its liquidity's share of the fees earned between collect and decrease, the holders and the treasury the rest (H-2). |
+| `fixes` | H-1 terminal path (a decrease refused 3 times ends with compensation shares); M-1 `Recover` for a lost deposit observation, a decrease that never reached its Position, a decrease whose receipt was lost after it ran, and a mint without receipt (with its late refund matched exactly); L-1 queue kick after an abort; L-2 minimum withdrawal and keeper/admin-only rebalances; L-3 mint price band. |
+| `lifecycle` | Open, deposits, trading, rebalance, trading, every holder exits, fees collected: per token, the vault's holdings change by exactly what entered or left at every step (DEX rounding only); nothing owed, held or stranded at the end. |
 | `gas` | Every handler's compute gas at 400 nanoGram/gas against the value that pays it (≥ 1.5×); user and keeper net costs; the vault's gas buffer must not shrink over a rebalance; pre-accept paths. |
 
-## Gas (sandbox compute gas; Gram at the 400 nanoGram/gas mainnet price)
+## Gas (sandbox compute gas)
 
-| Flow | Vault gas | Gram | Paid by |
+Constants are sized at 400 nanoGram/gas (≥ 1.5× measured), six times today's mainnet price of
+66.67 nanoGram/gas, so they also hold after a large price rise. Every vault transaction stays
+below 240k gas (the per-transaction limit is 1M).
+
+| Flow | Vault gas | Gram at 400 / at 66.67 nG | Paid by |
 |---|---|---|---|
 | Swap by someone else | 0 | 0 | — (no hook) |
-| Deposit: entry / pricing on the observation | 69–86k / 122k | 0.035 / 0.049 | depositor (`DEPOSIT_GAS` 0.35, rest refunded) |
-| Withdraw: largest vault tx (BurnReceipt) | 181k | 0.072 | withdrawer; **net user cost ≈ 0.15 Gram** |
-| Rebalance: largest vault tx (last arrival → both mints) | 216k | 0.087 | keeper budget; 28 txs; **keeper net ≈ 1.19 Gram**, mostly the DEX's `TICK_INIT_FEE` |
-| BurnReceipt pre-accept (hot NFT set) | 4.2k | 0.0017 | the message's own value |
+| Deposit: entry / pricing on the observation | 80–98k / 134k | 0.039 / 0.054 · 0.007 / 0.009 | depositor (`DEPOSIT_GAS` 0.35, rest refunded) |
+| Withdraw: largest vault tx (BurnReceipt) / USDT forward | 196k / 111k | 0.078 / 0.044 · 0.013 / 0.007 | withdrawer; **net user cost ≈ 0.19 Gram** in the sandbox |
+| Rebalance: largest vault tx (last arrival → both mints) | 233k | 0.093 · 0.016 | keeper budget; 28 txs; **keeper net ≈ 1.21 Gram**, mostly the DEX's `TICK_INIT_FEE` |
+| Recover: stale deposit / re-sync of a lost decrease | 89k / 221k | 0.036 / 0.089 · 0.006 / 0.015 | the caller (`RECOVER_GAS` 0.5, rest refunded) |
+| BurnReceipt pre-accept (hot NFT set) | 4.2k | 0.0017 · 0.0003 | the message's own value |
 
 ## Limitations and open risks
 
 See DESIGN §14.6. In short:
 - deposits are refunded if positions change while their observation is in flight (seconds);
-- withdrawals are serialized (one at a time, queue of 32) and collect fees first;
-- a DEX payout that never arrives stays in `exp` until it does (a rebalance then needs an abort);
+- withdrawals are serialized (one at a time, queue of 64) and collect fees first;
+- a DEX payout that never arrives stays in `exp` until `Recover` writes it off (25 h); a rebalance
+  then needs an abort;
+- a mint whose receipt is lost although the mint ran (only if the vault's own handler failed) is
+  written off by `Recover`; the NFT exists but the vault no longer tracks it;
 - after a quiet period the TWAP needs a `Poke` and one window before rebalancing;
 - rent over years of inactivity (nothing refills the buffer automatically);
 - the real USDT wallet's notification behaviour and freeze powers must be checked before mainnet.

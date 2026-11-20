@@ -12,6 +12,7 @@ import {
     Vault, storeDepositPayload, storeOpenPayload, Strategy, loadDepositRefusedEvent,
 } from '../build/Vault_Vault';
 import { events } from '../../dex/v2/tests/helpers';
+export { events };
 import { VaultWallet } from '../build/Vault_VaultWallet';
 import * as VM from './model';
 
@@ -23,7 +24,10 @@ export const GRAM_1 = 1_000_000_000n;      // 1 Gram in nanoGram
 export const SPACING = 60n;
 export const P0 = encodeSqrtPrice(3n * USDT, GRAM_1);   // 3 USDT per Gram
 export const DEAD_SHARES = 1_000_000n;
-export const WITHDRAW_GAS = toNano('1.6');
+export const WITHDRAW_GAS = toNano('1.8');
+export const MIN_WITHDRAW_SHARES = 100_000_000n;
+export const RECOVERY_DELAY = 90000;
+export const DEP_TIMEOUT = 600;
 export const REBALANCE_GAS = toNano('3.5');
 export const DEPOSIT_GAS = toNano('0.35');
 export const OPEN_GAS = toNano('1.5');
@@ -99,6 +103,8 @@ export class VaultFx {
             content: beginCell().storeUint(1, 8).storeStringTail('https://example.org/marg-vault-gram-usdt.json').endCell(),
         });
         expectNoFailures(setup);
+        // audit L-2: Rebalance is keeper (or admin) only; the fixture's keeper is set up front.
+        expectNoFailures(await f.vault.send(f.admin.getSender(), { value: toNano('0.05') }, { $$type: 'SetKeeper', queryId: 1n, keeper: f.keeper.address }));
         f.keyExt = null;
         f.pool = f.chain.openContract(Pool.fromAddress((await f.vault.getGetVaultData()).pool!));
         if (o.open ?? true) {
@@ -202,6 +208,10 @@ export class VaultFx {
         return this.vault.send((from ?? this.keeper).getSender(), { value }, { $$type: 'Poke', queryId: this.qid++ });
     }
 
+    async recover(from?: SandboxContract<TreasuryContract>, value = toNano('0.6')) {
+        return this.vault.send((from ?? this.mallory).getSender(), { value }, { $$type: 'Recover', queryId: this.qid++ });
+    }
+
     async swapGram(from: SandboxContract<TreasuryContract>, amount0: bigint, o: { minOut?: bigint; allowPartial?: boolean; receiver?: Address; fwdTon?: bigint } = {}) {
         return this.d.swapNative(from, amount0, this.d.tokA, { tickSpacing: SPACING, ext: this.keyExt, minOut: o.minOut ?? 0n,
             allowPartial: o.allowPartial, receiver: o.receiver, fwdTon: o.fwdTon });
@@ -274,6 +284,23 @@ export class VaultFx {
     async warm(seconds = 3700) {
         expectNoFailures(await this.poke());
         await this.wait(seconds);
+    }
+
+    // Holdings per token at the pool's current price: idle + performance fee + net in flight +
+    // every position's principal (the NFT's own liquidity) + its uncollected fees (pool getter).
+    async holdings() {
+        const v = await this.data();
+        const ps = await this.poolState();
+        let h0 = v.idle0 + v.fee0 + v.exp0 - v.due0;
+        let h1 = v.idle1 + v.fee1 + v.exp1 - v.due1;
+        for (const p of await this.positions()) {
+            const nft = await (await this.position(p.index)).getGetPositionData();
+            const am = VM.M.amountsForLiquidity(Number(ps.tick), ps.sqrtPriceX96, Number(nft.tickLower), Number(nft.tickUpper), nft.liquidity, false);
+            const pa = await this.pool.getGetPositionAmounts(nft.tickLower, nft.tickUpper, nft.liquidity, nft.fgLast0, nft.fgLast1, 0n);
+            h0 += am.a + pa.fees0;
+            h1 += am.b + pa.fees1;
+        }
+        return { h0, h1 };
     }
 
     // Everything the reference model needs, read through getters (vault + pool + NFTs).

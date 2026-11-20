@@ -82,7 +82,7 @@ describe('fee converter', () => {
     const isApproved = async (j: SandboxContract<TestJettonMaster>, key: Key) =>
         conv.getGetConvertKeyApproved((await convWallet(j)).address, key.tickSpacing, key.ext);
 
-    const collectProtocol = (key: Key) => d.router.send(d.carol.getSender(), { value: toNano('0.3') }, {
+    const collectProtocol = (key: Key) => d.router.send(d.carol.getSender(), { value: toNano('0.35') }, {
         $$type: 'CollectProtocolFees', queryId: 3n, key: { $$type: 'PoolKey', ...key },
     });
 

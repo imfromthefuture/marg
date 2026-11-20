@@ -1,0 +1,25 @@
+[Unit]
+Description=Marg Toncenter JSON-RPC method allowlist (in front of toncenter for the web /toncenter proxy)
+After=network-online.target
+
+[Service]
+User=tron-tcproxy
+Group=tron-tcproxy
+Environment=PORT=8812
+Environment=TONCENTER_UPSTREAM=https://toncenter.com/api/v2/jsonRPC
+# No secrets here: nginx adds the X-API-Key header and the service passes it on.
+ExecStart=/usr/bin/node /opt/tron-tcproxy/tc-proxy.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

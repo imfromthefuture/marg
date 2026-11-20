@@ -289,7 +289,7 @@ contract Pool {
         }
         if (code == 0) {
             let need = MINT_POOL_GAS + m.newTicks * (TICK_RENT_BUFFER + TICK_INIT_FEE) + POSITION_DEPLOY_VALUE +
-                (msg.devBuy > 0 ? DEV_BUY_POOL_GAS + JETTON_PAYOUT_VALUE + PAYOUT_MSG_GAS + self.payoutGas(ext) : 0);
+                (msg.devBuy > 0 ? DEV_BUY_POOL_GAS + JETTON_PAYOUT_VALUE + LAUNCH_REPORT_VALUE + self.payoutGas(ext) : 0);
             if (ctx.value - msg.devBuy < need) {
                 code = CODE_LOW_GAS;
             } else if (m.use0 != 0) {
@@ -377,7 +377,7 @@ contract Pool {
             // pool transaction can never overtake it, whatever the shard layout.
             message(MessageParameters {
                 to: msg.refundTo,
-                value: PAYOUT_MSG_GAS,
+                value: LAUNCH_REPORT_VALUE,
                 mode: SendPayGasSeparately | SendIgnoreErrors,
                 bounce: false,
                 body: GramPayout { queryId: msg.queryId, reason: REASON_LAUNCH_DONE, amount: 0, payload: null }.toCell(),
@@ -575,7 +575,7 @@ contract Pool {
         self.protocolFees0 = 0;
         self.protocolFees1 = 0;
         self.reserveForCaller(self.isNative() ? f0 : 0);
-        self.payTwo(msg.queryId, f0, f1, msg.treasury, msg.excessTo, REASON_PROTOCOL_FEE, 0);
+        self.payFees(msg.queryId, f0, f1, msg.treasury, msg.excessTo, REASON_PROTOCOL_FEE, PAYOUT_MSG_GAS);
     }
 
     // TAX plugin: anyone (via the Router) pays the accrued tax to the key's taxRecipient.
@@ -589,7 +589,7 @@ contract Pool {
             self.excess(msg.excessTo, msg.queryId);
             return;
         }
-        self.payTwo(msg.queryId, f, 0, ext.taxRecipient!!, msg.excessTo, REASON_TAX, 0);
+        self.payFees(msg.queryId, f, 0, ext.taxRecipient!!, msg.excessTo, REASON_TAX, TAX_PAYOUT_GAS);
     }
 
     // PLATFORM FEE: anyone (via the Router) pays the carried platform fees to the treasury.
@@ -598,7 +598,7 @@ contract Pool {
         let f = self.platformFees;
         self.platformFees = 0;
         self.reserveForCaller(f);
-        self.payTwo(msg.queryId, f, 0, msg.treasury, msg.excessTo, REASON_PLATFORM, 0);
+        self.payFees(msg.queryId, f, 0, msg.treasury, msg.excessTo, REASON_PLATFORM, PAYOUT_MSG_GAS);
     }
 
     // v3: anyone (via the Router) sends the surplus above keep() to the treasury. The surplus is
@@ -1132,6 +1132,29 @@ contract Pool {
             bounce: false,
             body: JettonExcesses { queryId }.toCell(),
         });
+    }
+
+    // v4 (audit R4B-3): fee collections pay each leg with a fixed value (jetton legs JETTON_PAYOUT_VALUE,
+    // the Gram leg amount + gram) and return the rest of the caller's value to excessTo, instead of
+    // handing it to the fee recipient with the last leg.
+    fun payFees(queryId: Int, amount0: Int, amount1: Int, to: Address, excessTo: Address, reason: Int, gram: Int) {
+        if (amount0 > 0) {
+            if (self.isNative()) {
+                message(MessageParameters {
+                    to,
+                    value: amount0 + gram,
+                    mode: SendPayGasSeparately | SendBounceIfActionFail,
+                    bounce: false,
+                    body: GramPayout { queryId, reason, amount: amount0, payload: null }.toCell(),
+                });
+            } else {
+                self.sendToken(true, amount0, to, excessTo, reason, queryId, 0, null, false);
+            }
+        }
+        if (amount1 > 0) {
+            self.sendToken(false, amount1, to, excessTo, reason, queryId, 0, null, false);
+        }
+        self.excess(excessTo, queryId);
     }
 
     // Up to two payout legs; jetton legs first, the last one takes the remaining balance (copied

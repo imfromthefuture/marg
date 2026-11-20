@@ -66,7 +66,7 @@ describe('fee-on-transfer jettons', () => {
         res = await d.decrease(pos, d.alice, pd.liquidity);
         expectNoFailures(res);
         const st = await pool.getGetPoolState();
-        res = await d.router.send(d.bob.getSender(), { value: toNano('0.3') }, {
+        res = await d.router.send(d.bob.getSender(), { value: toNano('0.35') }, {
             $$type: 'CollectProtocolFees', queryId: 0n,
             key: { $$type: 'PoolKey', token0: st.key.token0, token1: st.key.token1, tickSpacing: st.key.tickSpacing, ext: st.key.ext },
         });

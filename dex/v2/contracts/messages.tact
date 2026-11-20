@@ -294,7 +294,7 @@ message(0x4d48001b) CollectTax {
     key: PoolKey;
 }
 
-// Admin: set the global PLATFORM FEE in [0, PLATFORM_FEE_CAP_BPS] (1%).
+// Admin: set the global PLATFORM FEE in [PLATFORM_FEE_MIN_BPS, PLATFORM_FEE_CAP_BPS] (0.85% to 1%).
 message(0x4d48001d) SetPlatformFee {
     queryId: Int as uint64;
     bps: Int as uint16;

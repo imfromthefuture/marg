@@ -45,11 +45,11 @@ export const GAS = {
     WALLET: toNano('0.15'),         // the user's jetton wallet hop; +0.05 for a holder-rewards checkpoint (launch/README.md)
     MARGIN: toNano('0.05'),         // 2 forward fees and some slack
 };
-// The contracts allow 24 (MAX_CROSSINGS_CAP), but a swap is one Pool transaction and TON caps it at
-// 1M gas: on an adversarial tick layout 24 crossings plus fee checkpoints can exceed that, the Pool
-// aborts, and because the Router -> Pool hop does not bounce the input would be left in the Pool.
-// The app asks for at most 12 (measured worst case about 470k gas); a bigger swap partly fills or
-// is refunded instead.
+// The contracts allow up to 24 crossings per swap (MAX_CROSSINGS_CAP). Since v3 the Pool also stops
+// the swap loop once the transaction has used SWAP_GAS_STOP (650k) gas (stop reason "gas limit"), so a
+// swap no longer aborts on a heavy tick layout: the unfilled rest is refunded or partly filled. The
+// Router charges CROSS gas for every allowed crossing, so the app asks for at most 12 (measured worst
+// case about 470k gas) to keep the attached Gram low; a bigger swap partly fills or is refunded.
 export const MAX_CROSSINGS = 12n;
 // Crossings to allow for a quoted swap: what the quote crossed plus 4 spare (the price may move a
 // little before execution), capped. The Router charges CROSS gas per allowed crossing, so this keeps
@@ -76,7 +76,7 @@ const CODES: Record<number, string> = {
     223: 'No liquidity at this price', 229: 'Amount too large', 230: 'Bad price limit',
 };
 export const codeText = (code: bigint | number) => CODES[Number(code)] ?? `Refused (code ${code})`;
-export const STOPS = ['filled', 'price limit', 'crossing cap (24 ticks per transaction)', 'step cap', 'no more liquidity', 'gas limit of one transaction'];
+export const STOPS = ['filled', 'price limit', 'crossing limit of this swap (the app allows up to 12 ticks)', 'step cap', 'no more liquidity', 'gas limit of one transaction'];
 
 export const openRouter = (a: Address) => client.open(Router.fromAddress(a));
 export const openPool = (a: Address) => client.open(Pool.fromAddress(a));

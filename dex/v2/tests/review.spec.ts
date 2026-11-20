@@ -334,7 +334,7 @@ describe('issue 1: spare Gram in a pool is never paid to whoever calls a collect
         expect((await pool.getGetPoolState()).endowment).toBe(s0.endowment + toNano('5'));
         const poolGram = await d.gram(pool.address);
 
-        const value = toNano('0.2');
+        const value = toNano('0.35');     // v4: PROTOCOL_COLLECT_GAS (CollectTax needs less)
         for (const body of [
             { $$type: 'CollectTax' as const, queryId: 1n, key },
             { $$type: 'CollectProtocolFees' as const, queryId: 2n, key },

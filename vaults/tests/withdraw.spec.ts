@@ -31,9 +31,9 @@ async function expectProRata(f: VaultFx, who: any, shares: bigint) {
     const ub = await f.usdtBal(who.address);
     const res = await f.withdraw(who, shares);
     expectNoFailures(res);
-    expect(gramPaidTo(res, who.address, 1)).toBe(split.g);
-    const fromPool = gramPayouts(res, who.address).filter((g) => g.reason === REASON.POSITION_OUT).reduce((a, g) => a + g.amount, 0n);
-    expect(fromPool).toBe(p0);
+    // audit H-1/H-2: the Pool pays the vault; the vault forwards the principal (Gram as VaultPayout reason 1)
+    expect(gramPaidTo(res, who.address, 1)).toBe(split.g + p0);
+    expect(gramPayouts(res, who.address).filter((g) => g.reason === REASON.POSITION_OUT).length).toBe(0);
     expect((await f.usdtBal(who.address)) - ub).toBe(split.u + p1);
     const v = await f.data();
     expect(v.supply).toBe(sn.v.supply - shares);
@@ -47,14 +47,14 @@ async function expectProRata(f: VaultFx, who: any, shares: bigint) {
         expect(now ? now.L : 0n).toBe(p.L - split.dL[i]);
         if (now) expect(now.reserved).toBe(0n);
     });
-    expect([v.workerActive, v.opCount, v.exp0, v.exp1]).toEqual([false, 0n, 0n, 0n]);
+    expect([v.workerActive, v.opCount, v.exp0, v.exp1, v.due0, v.due1, v.opGas]).toEqual([false, 0n, 0n, 0n, 0n, 0n, 0n]);
     await f.expectPositionsMatchNfts();
     await f.expectSolvent();
     return res;
 }
 
 describe('withdrawals', () => {
-    it('pay exactly shares/supply of idle and of every position, in kind, straight from the Pool', async () => {
+    it('pay exactly shares/supply of idle and of every position, in kind (the Pool pays the vault, the vault forwards)', async () => {
         const f = await withHolders();
         await expectProRata(f, f.alice, (await f.shares(f.alice.address)) / 3n);
         await expectProRata(f, f.bob, await f.shares(f.bob.address));

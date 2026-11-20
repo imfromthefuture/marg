@@ -1,5 +1,5 @@
 [Unit]
-Description=Marg keeper (harvests launch taxes, runs due buybacks)
+Description=Marg keeper (collects launch taxes, runs due buybacks, releases escrowed launch fees, repairs reward views, watches Router rent)
 After=network-online.target tron-indexer.service
 Wants=tron-indexer.service
 
@@ -10,12 +10,15 @@ WorkingDirectory=/opt/tron-keeper
 Environment=NETWORK=mainnet
 Environment=INDEXER_URL=http://127.0.0.1:8811/api/idx/tokens?kind=dex
 # Allowlist: only masters these factories derive are called (same list as the indexer).
-Environment=LAUNCH_FACTORY=EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1
+Environment=LAUNCH_FACTORY=EQChP_pRE50KqE3QvRHwogpoCuIrp1To5sBckCIwNS1J27Ja
 Environment=KEEPER_INTERVAL_SEC=600
 Environment=KEEPER_MIN_TAX=0.5
 Environment=KEEPER_MIN_BALANCE=0.3
 Environment=KEEPER_MAX_TX=10
-# KEEPER_MNEMONIC (and optionally TONCENTER_API_KEY) live here: root-owned, mode 0600, never committed.
+# Persisted state (last seen gas price, last rewards scan, status line): /var/lib/tron-keeper/keeper-state.json.
+StateDirectory=tron-keeper
+# KEEPER_MNEMONIC and TONCENTER_API_KEY live here: root-owned, mode 0600, never committed. The keeper must use
+# its OWN Toncenter key, not the one nginx adds for the web proxy (audit R2-M4: separate rate limits).
 EnvironmentFile=/etc/tron-keeper.env
 ExecStart=/usr/bin/node /opt/tron-keeper/dist/keeper.js
 Restart=always

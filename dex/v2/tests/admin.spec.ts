@@ -106,7 +106,7 @@ describe('admin', () => {
         expectNoFailures(await d.router.send(d.admin.getSender(), { value: toNano('0.1') }, { $$type: 'SetTreasury', queryId: 0n, treasury: d.carol.address }));
         const st = await pool.getGetPoolState();
         expect(st.protocolFees0).toBeGreaterThan(0n);
-        res = await d.router.send(d.bob.getSender(), { value: toNano('0.3') }, { $$type: 'CollectProtocolFees', queryId: 0n, key });
+        res = await d.router.send(d.bob.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 0n, key });
         expectNoFailures(res);
         expect(gramPayouts(res, d.carol.address).map((x) => [x.reason, x.amount])).toEqual([[REASON.PROTOCOL_FEE, st.protocolFees0]]);
         expect(gramPayouts(res, d.treasury.address)).toEqual([]);
@@ -151,7 +151,7 @@ describe('admin', () => {
         res = await d.router.send(d.admin.getSender(), { value: toNano('0.1') }, { $$type: 'WithdrawRouterExcess', queryId: 0n });
         expectNoFailures(res);
         expect(await d.gram(d.treasury.address)).toBeGreaterThan(tBefore + toNano('3'));
-        expect(await d.gram(d.router.address)).toBeLessThanOrEqual(toNano('0.05'));
+        expect(await d.gram(d.router.address)).toBeLessThanOrEqual(toNano('0.55'));  // v4: ROUTER_RENT_RESERVE
         expect(await d.gram(pool.address)).toBe(poolGram);
         expect(await d.routerHolds(d.tokA)).toBe(jHeld);
         await expectPoolEquals(pool, await simOf(pool));

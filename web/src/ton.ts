@@ -79,17 +79,83 @@ export async function verifiedWallet(master: Address, owner: Address): Promise<A
     return wallet;
 }
 
-// A launch-token wallet keeps only ~0.01 Gram and pays its storage rent from it. After a couple of
-// idle years that is gone, and the master's small reward ack to the wallet would be eaten by the
-// rent debt, which blocks the holder's claims for good (audit round 4, R4A-1). So before the site
-// makes such a wallet act (claim, sell), it tops up a nearly empty one in the same transaction.
-// The Gram stays in the user's own token wallet. Plain non-bounceable transfer, sent first.
+// A launch-token wallet keeps about 0.01 Gram for its storage rent (v4 refills it on every send). After a
+// long idle time it can run low; before the site makes such a wallet act (claim, sell), it tops up a
+// nearly empty one in the same transaction (audit R4A-1, C8). The Gram stays in the user's own token
+// wallet. Plain non-bounceable transfer, sent first.
+//
+// The stored balance does not include the rent accrued since the wallet's last transaction (it is
+// charged only when the wallet next runs), so a live v3 wallet idle for 3 years still reads ~0.0118
+// while it really owes more than that. The check therefore estimates the effective balance as
+// `balance - WALLET_RENT_PER_YEAR x years since the last transaction` (last tx time from
+// getTransactions, limit 1). If that time cannot be read it tops up whenever the stored balance is
+// below WALLET_TOPUP_BLIND.
+//
+// It never blocks the action: the probe bypasses the request queue, gets WALLET_PROBE_MS, and any
+// failure or timeout means "no top-up". Pages prefetch it when the claim / sell UI opens
+// (prefetchWalletTopUp), so the click normally finds the answer ready.
 const WALLET_TOPUP = toNano('0.05');
-const WALLET_TOPUP_BELOW = toNano('0.03');
-export async function walletTopUp(wallet: Address): Promise<{ address: string; amount: string; payload?: string } | null> {
-    const st = await q(() => client.getContractState(wallet));
-    if (st.state !== 'active' || st.balance >= WALLET_TOPUP_BELOW) return null;
-    return { address: wallet.toString({ bounceable: false }), amount: WALLET_TOPUP.toString() };
+const WALLET_TOPUP_BELOW = toNano('0.005');      // estimated effective balance below this: top up
+const WALLET_TOPUP_BLIND = toNano('0.02');       // last tx time unknown: top up below this stored balance
+const WALLET_RENT_PER_YEAR = toNano('0.005');    // a launch wallet's rent is ~0.0045 Gram/year (R4A-1), rounded up
+const WALLET_PROBE_MS = 3000;
+const WALLET_PROBE_TTL = 60_000;
+const YEAR = 365 * 86400;
+type TopUp = { address: string; amount: string; payload?: string };
+
+async function probeTopUp(wallet: Address): Promise<TopUp | null> {
+    const st = await client.getContractState(wallet);
+    if (st.state !== 'active') return null;
+    let lastUtime: number | null = null;
+    try {
+        // The last transaction of a long-idle wallet may only be on an archival node; a slow answer
+        // falls back to the stored-balance rule instead of using up the whole probe time.
+        const txs = await Promise.race([
+            client.getTransactions(wallet, { limit: 1, archival: true }),
+            new Promise<null>((r) => setTimeout(() => r(null), WALLET_PROBE_MS - 1200)),
+        ]);
+        if (txs?.[0]) lastUtime = txs[0].now;
+    } catch {
+        lastUtime = null;
+    }
+    let need: boolean;
+    if (lastUtime === null) {
+        need = st.balance < WALLET_TOPUP_BLIND;
+    } else {
+        const idle = Math.max(0, Math.floor(Date.now() / 1000) - lastUtime);
+        const rent = (WALLET_RENT_PER_YEAR * BigInt(idle)) / BigInt(YEAR);
+        need = st.balance - rent < WALLET_TOPUP_BELOW;
+    }
+    return need ? { address: wallet.toString({ bounceable: false }), amount: WALLET_TOPUP.toString() } : null;
+}
+
+const topUpCache = new Map<string, { at: number; p: Promise<TopUp | null> }>();
+function topUpProbe(wallet: Address) {
+    const k = wallet.toRawString();
+    const hit = topUpCache.get(k);
+    if (hit && Date.now() - hit.at < WALLET_PROBE_TTL) return hit.p;
+    const p = probeTopUp(wallet).catch(() => null);
+    topUpCache.set(k, { at: Date.now(), p });
+    if (topUpCache.size > 200) topUpCache.delete(topUpCache.keys().next().value!);
+    return p;
+}
+
+// Start the probe early (when a claim card or a sell quote of a launch token shows up).
+export function prefetchWalletTopUp(wallet: Address): void {
+    topUpProbe(wallet);
+}
+
+// The top-up message to prepend, or null. Resolves within WALLET_PROBE_MS whatever happens.
+export async function walletTopUp(wallet: Address): Promise<TopUp | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((r) => { timer = setTimeout(() => r(null), WALLET_PROBE_MS); });
+    try {
+        return await Promise.race([topUpProbe(wallet), timeout]);
+    } catch {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 export { buildOnchainContent, parseContent } from './content';

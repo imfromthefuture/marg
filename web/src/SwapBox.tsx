@@ -7,7 +7,7 @@ import {
     recentLaunches, trustedJetton, TxMessage,
 } from './dex';
 import { estimateOut, minOutFor, priceImpact } from './dexmath';
-import { client, fmtTokens, fmtTon, jettonBalance, parseAmount, q, short, unitsToString } from './ton';
+import { client, fmtTokens, fmtTon, jettonBalance, parseAmount, prefetchWalletTopUp, q, short, unitsToString } from './ton';
 import { TokenImage } from './pages/Home';
 
 const SLIPPAGES = [0.5, 1, 3, 5];
@@ -49,7 +49,8 @@ export function useBalance(token: DexToken | null, owner: Address | null, versio
         if (!token || !owner) return;
         let alive = true;
         const read = token.master
-            ? jettonBalance(token.master, owner).then((b) => b.balance)
+            // C8: a launch token's wallet gets its top-up check now, before the sell click (see ton.ts).
+            ? jettonBalance(token.master, owner).then((b) => { if (token.launch && b.balance > 0n) prefetchWalletTopUp(b.wallet); return b.balance; })
             : q(() => client.getBalance(owner));
         // One retry pass after a pause if Toncenter still refuses (the sell side needs the balance).
         read.catch(() => new Promise((r) => setTimeout(r, 4000)).then(() => (token.master

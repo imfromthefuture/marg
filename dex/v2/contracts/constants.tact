@@ -45,6 +45,9 @@ const TAX_MAX_BPS: Int = 1000;                 // TAX plugin: 10% buy / 10% sell
 //   true  = every Gram pool (token0 == GRAM), plain keys included.
 const PLATFORM_FEE_ALL_GRAM_POOLS: Bool = false;
 const PLATFORM_FEE_CAP_BPS: Int = 100;         // 1%, also the initial rate
+// v4 (audit R8B-2): the platform fee cannot go below this, so a sandwich around a buyback (which swaps with
+// minOut 0) stays unprofitable, also on tokens with a large creator vault (thinner pool).
+const PLATFORM_FEE_MIN_BPS: Int = 85;          // 0.85% (0.75% is the sandwich break-even, audit R9B-6)
 const PLATFORM_MIN_PAYOUT: Int = ton("0.01");  // below this the fee is carried in Pool.platformFees
 // TAX auto-payout: once a taxed pool's taxFees reach this, the swap that crosses it pays the whole
 // taxFees to taxRecipient (GramPayout reason TAX) in the same transaction. Below it the tax accrues
@@ -76,6 +79,9 @@ const SWAP_GAS_STOP: Int = 650000;
 
 // --- storage buffers ---
 const ROUTER_MIN_STORAGE: Int = ton("0.05");
+// v4 (audit R4A-2): WithdrawRouterExcess leaves this much, about 10 years of the Router's rent, so a quiet
+// Router never runs into storage debt (which would eat the fixed-value PayTo of an LP exit).
+const ROUTER_RENT_RESERVE: Int = ton("0.55");
 const POOL_MIN_STORAGE: Int = ton("0.05");
 const POSITION_MIN_STORAGE: Int = ton("0.02");
 const MINT_ACCOUNT_MIN_STORAGE: Int = ton("0.01");
@@ -100,13 +106,19 @@ const TAX_PAYOUT_GAS: Int = ton("0.04");
 const MINT_GAS: Int = ton("0.6");          // Pool need <= 0.5 (2 new ticks incl. TICK_INIT_FEE) + hop costs
 const GRADUATE_GAS: Int = ton("0.5");      // Pool need <= 0.42 + hop costs
 const LAUNCH_GAS: Int = ton("0.5");        // direct launch without dev buy: Pool need <= 0.43 + hop costs
-const DEV_BUY_GAS: Int = ton("0.15");      // added when devBuy > 0 (swap compute + the jetton payout)
+const DEV_BUY_GAS: Int = ton("0.18");      // added when devBuy > 0 (swap compute + the jetton payout + the launch report)
 const DEV_BUY_POOL_GAS: Int = ton("0.05"); // Pool-side compute of the dev buy (on top of MINT_POOL_GAS)
 const POSITION_DEPLOY_VALUE: Int = ton("0.03");
 const DECREASE_GAS: Int = ton("0.25");
 const BURN_POOL_GAS: Int = ton("0.2");
 const POSITION_SYNC_VALUE: Int = ton("0.02");
 const COLLECT_GAS: Int = ton("0.2");
+// v4 (audit R6A-4): CollectProtocolFees can pay two jetton legs (2 x JETTON_PAYOUT_VALUE) on a jetton/jetton
+// pool; the caller gets the unused part back.
+const PROTOCOL_COLLECT_GAS: Int = ton("0.35");
+// v4 (audit R6B-2): the launch-outcome report to the master (GramPayout reason 19 next to a filled dev buy);
+// the master's handler takes ~55k gas, so this covers a gas-price rise of ~10x.
+const LAUNCH_REPORT_VALUE: Int = ton("0.04");
 const ADMIN_GAS: Int = ton("0.05");
 const ROUTER_REFUND_MIN: Int = ton("0.08");
 const MINT_ACCOUNT_REFUND_GAS: Int = ton("0.2");

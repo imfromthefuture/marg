@@ -371,13 +371,17 @@ describe('swap: refunds and validation (Router and Pool)', () => {
     it('jetton/jetton pool: both directions exact', async () => {
         const pj = await d.poolOf(d.tokA, d.tokB, 60n, null);
         expectNoFailures(await d.mintJetton(d.jA, d.alice, toNano('1000'), d.tokB, -1200n, 1200n, 0n, { viaAccount: true, sqrtPriceInit: Q96 }));
-        expectNoFailures(await d.mintJetton(d.jB, d.alice, toNano('1000'), d.tokA, -1200n, 1200n, 0n, { viaAccount: true }));
+        // (audit R6A-6: both legs carry sqrtPriceInit, otherwise the mint is refunded and the pool stays empty)
+        expectNoFailures(await d.mintJetton(d.jB, d.alice, toNano('1000'), d.tokA, -1200n, 1200n, 0n, { viaAccount: true, sqrtPriceInit: Q96 }));
         const st = await pj.getGetPoolState();
+        expect(st.initialized).toBe(true);
+        expect(st.liquidity).toBeGreaterThan(0n);
         const aIs0 = st.key.token0.equals(d.tokA);
         for (const [m, other, zfo] of [[d.jA, d.tokB, aIs0], [d.jB, d.tokA, !aIs0]] as const) {
             const outM = m === d.jA ? d.jB : d.jA;
             const before = await d.jBal(outM, d.bob.address);
             const { e } = await exact(pj, M.PLAIN_EXT, zfo, toNano('20'), {}, d.now, () => d.swapJetton(m, d.bob, toNano('20'), other));
+            expect(e.out).toBeGreaterThan(0n);                     // a real swap, not a refund
             expect(await d.jBal(outM, d.bob.address)).toBe(before + e.out);
         }
         await d.checkSolvency([pj, pool]);

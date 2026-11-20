@@ -12,12 +12,12 @@ const FACTORY_MIN_STORAGE: Int = ton("0.05");
 // Value forwarded to the Router with the launch transfer (Router LAUNCH_GAS 0.5 + forward fees).
 const ROUTER_LAUNCH_VALUE: Int = ton("0.55");
 // Extra Router value when devBuy > 0 (Router DEV_BUY_GAS 0.15 + margin), on top of devBuy itself.
-const ROUTER_DEV_VALUE: Int = ton("0.17");
+const ROUTER_DEV_VALUE: Int = ton("0.2");
 // Factory + master + Router-wallet hops: compute, forward fees (StateInits), master storage.
 const HOPS_GAS: Int = ton("0.15");
 // Extra value when the launch has a creator vault: VAULT_DEPLOY_VALUE 0.05 + VAULT_WALLET_VALUE 0.03 (both kept
 // as storage reserves) + the master's extra compute and the two StateInit forward fees (~0.02) + margin.
-const VAULT_GAS: Int = ton("0.12");
+const VAULT_GAS: Int = ton("0.13");
 
 // Hard caps (code constants; the DEX enforces its own, identical or wider, caps again).
 const TAX_MIN_BPS: Int = 100;                  // a tax is 0 (off) or 1%..5%
@@ -67,6 +67,9 @@ contract LaunchFactory {
     receive(msg: CreateToken) {
         let ctx = context();
         let creator = ctx.sender;
+        // v4 (audit R7B-3): this tag marks the master's own DEX requests; a launch with it would have its refund
+        // credited to the buyback bucket.
+        require((msg.queryId >> 32) != 0x4d4cbbbb, "Reserved queryId");
         // Audit L-5: the DEX refuses a non-basechain refund / dev-buy receiver, so such a launch could only
         // fail. Refused here (bounced: the whole value goes back) before anything is deployed.
         require(isBasechain(creator), "Creator not on basechain");
@@ -96,6 +99,9 @@ contract LaunchFactory {
             walletBps = msg.walletBps;
             buybackBps = msg.buybackBps;
             require(rewardsBps + walletBps + buybackBps == BPS_100, "Split must sum to 100%");
+            // v4 (audit R10-1): holder rewards need a buyback or wallet share, which takes the rewards
+            // share until holders own 1% of the supply, so no token ever carries it (no carry to capture).
+            require(rewardsBps == 0 || walletBps + buybackBps > 0, "Rewards need a buyback or wallet share");
             if (walletBps > 0) {
                 taxWallet = msg.taxWallet != null ? msg.taxWallet!! : creator;
                 require(isBasechain(taxWallet!!) && taxWallet!! != self.router && taxWallet!! != myAddress(), "Invalid tax wallet");

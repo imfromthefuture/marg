@@ -47,11 +47,13 @@ function tactConst(file: string, n: string): bigint {
 }
 const J = (n: string) => tactConst('../contracts/jetton.tact', n);
 const D = (n: string) => tactConst('../../dex/v2/contracts/constants.tact', n);
+const REWARD_MIN_SHARES = J('REWARD_MIN_SHARES');   // v4 (R8B-1): accrual starts at 1% of the supply tracked
 const C = {
     CP_MASTER_GAS: J('CP_MASTER_GAS'), ACK_GAS: J('ACK_GAS'), CLAIM_MASTER_GAS: J('CLAIM_MASTER_GAS'), CLAIM_WALLET_GAS: J('CLAIM_WALLET_GAS'),
     TAX_IN_GAS: J('TAX_IN_GAS'), BUYBACK_GAS: J('BUYBACK_GAS'), KEEPER_FEE: J('KEEPER_FEE'),
     HARVEST_VALUE: J('HARVEST_VALUE'), BUYBACK_MIN: J('BUYBACK_MIN'), INTERVAL: Number(J('BUYBACK_INTERVAL')),
-    HARVEST_INTERVAL: Number(J('HARVEST_INTERVAL')), MIN_STORAGE: J('MASTER_MIN_STORAGE'), BURN_FWD: J('BURN_FWD'),
+    HARVEST_INTERVAL: Number(J('HARVEST_INTERVAL')), HARVEST_CALLER_INTERVAL: Number(J('HARVEST_CALLER_INTERVAL')), MIN_STORAGE: J('MASTER_MIN_STORAGE'), BURN_FWD: J('BURN_FWD'),
+    RENT_FUND_TARGET: J('RENT_FUND_TARGET'),
     // DEX: the tax auto-payout threshold and the value each payout carries on top of the tax.
     TAX_MIN_PAYOUT: D('TAX_MIN_PAYOUT'), TAX_PAYOUT_GAS: D('TAX_PAYOUT_GAS'),
 };
@@ -255,7 +257,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         expect((await master.getGetRewardsData()).totalShares).toBe(await jBal(master, holders[0].address));
         // No rewards share: wallets are plain (untracked), no checkpoints at all.
         // Dev buy with rewards on, at exactly get_create_value: no failure; the creator is tracked from the start.
-        const t3 = await launch({ buyTaxBps: 300n, sellTaxBps: 300n, rewardsBps: 10000n, devBuy: toNano('20') });
+        const t3 = await launch({ buyTaxBps: 300n, sellTaxBps: 300n, rewardsBps: 9999n, buybackBps: 1n, devBuy: toNano('20') });
         const cs = await rState(t3.master, creator.address);
         expect(cs!.synced).toBe(await jBal(t3.master, creator.address));
         expect((await t3.master.getGetRewardsData()).totalShares).toBe(cs!.synced);
@@ -279,20 +281,47 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             .toEqual([[owed, owed + C.TAX_PAYOUT_GAS]]);
         const [sp] = splitEvents(res.transactions);
         const r = (owed * 3333n) / 10000n, w = (owed * 3334n) / 10000n;
-        expect([sp.amount, sp.rewards, sp.wallet, sp.buyback]).toEqual([owed, r, w, owed - r - w]);
+        // v4: the rewards share first fills the master's rent fund (up to RENT_FUND_TARGET); here all of it.
+        const rent = r < C.RENT_FUND_TARGET ? r : C.RENT_FUND_TARGET;
+        expect([sp.amount, sp.rewards, sp.rent, sp.wallet, sp.buyback]).toEqual([owed, r - rent, rent, w, owed - r - w]);
+        expect(sp.rewards + sp.rent + sp.wallet + sp.buyback).toBe(sp.amount);
         // The wallet gets exactly its share (buyback is on, so the gas leftover goes to the bucket).
         expect(comments(res.transactions, master.address, holders[4].address, 'Marg tax')).toEqual([w]);
         const rd = await master.getGetRewardsData();
-        expect(rd.accrued + rd.carry).toBe(r);
+        expect(rd.accrued + rd.carry).toBe(r - rent);
+        expect(rd.rentFund).toBe(rent);
         const st = await master.getGetBuybackStatus();
         expect(st.balance).toBeGreaterThanOrEqual(owed - r - w);
         expect(st.count).toBe(0n);   // below BUYBACK_MIN + BUYBACK_GAS: no buyback yet
-        // Everything is held: master balance >= storage + rewards + bucket.
+        // Everything is held: master balance >= storage + rewards + rent fund + bucket.
         expect(await balOf(master.address)).toBeGreaterThanOrEqual(C.MIN_STORAGE + r + st.balance);
         const td = await master.getGetTaxData();
         expect([td.taxIn, td.walletPaid]).toEqual([owed, w]);
         // eslint-disable-next-line no-console
-        console.log(`split ${owed}: rewards ${r}, wallet ${w}, buyback ${owed - r - w}; bucket also got ${st.balance - (owed - r - w)} of gas leftover; master +${(await balOf(master.address)) - mb}`);
+        console.log(`split ${owed}: rewards ${r - rent} + rent fund ${rent}, wallet ${w}, buyback ${owed - r - w}; bucket also got ${st.balance - (owed - r - w)} of gas leftover; master +${(await balOf(master.address)) - mb}`);
+        // The next payouts top the rent fund up to exactly RENT_FUND_TARGET, then the whole rewards share accrues.
+        let fund = rent;
+        // v4 (audit R9B-1/2): while tracked holders own under REWARD_MIN_SHARES the rest of the rewards share goes to
+        // the buyback bucket (reported as buyback, rewards 0).
+        for (let n = 0; n < 2; n++) {
+            const T = (await master.getGetRewardsData()).totalShares;
+            const rn = await buy(holders[1], key, toNano('17.123456789'));
+            expectNoFailures(rn);
+            const [s2] = splitEvents(rn.transactions);
+            const top = r < C.RENT_FUND_TARGET - fund ? r : C.RENT_FUND_TARGET - fund;
+            const toHolders = T < REWARD_MIN_SHARES ? 0n : r - top;
+            expect([s2.amount, s2.rewards, s2.rent, s2.wallet, s2.buyback]).toEqual([owed, toHolders, top, w, owed - r - w + (r - top - toHolders)]);
+            fund += top;
+            expect((await master.getGetRewardsData()).rentFund).toBe(fund);
+        }
+        expect(fund).toBe(C.RENT_FUND_TARGET);
+        const T3 = (await master.getGetRewardsData()).totalShares;
+        const rn = await buy(holders[1], key, toNano('17.123456789'));
+        expect(splitEvents(rn.transactions).map((x) => [x.rewards, x.rent])).toEqual([[T3 < REWARD_MIN_SHARES ? 0n : r, 0n]]);
+        // Once 1% of the supply is tracked the whole rewards share accrues.
+        while ((await master.getGetRewardsData()).totalShares < REWARD_MIN_SHARES) expectNoFailures(await buy(holders[2], key, toNano('17.123456789')));
+        const rn2 = await buy(holders[1], key, toNano('17.123456789'));
+        expect(splitEvents(rn2.transactions).map((x) => [x.rewards, x.rent, x.buyback])).toEqual([[r, 0n, owed - r - w]]);
 
         // walletBps only (no buyback): the wallet gets its share plus the leftover; dust to the wallet.
         // Below TAX_MIN_PAYOUT the tax stays in the pool (no payout in the swap) until CollectTax.
@@ -306,7 +335,8 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         const res2 = await collect(t2.key);
         expect(gramPayouts(res2, t2.master.address).filter((x) => x.reason === REASON.TAX).map((x) => x.amount)).toEqual([owed2]);
         const [sp2] = splitEvents(res2.transactions);
-        expect([sp2.rewards, sp2.wallet, sp2.buyback]).toEqual([(owed2 * 5001n) / 10000n, owed2 - (owed2 * 5001n) / 10000n, 0n]);
+        expect([sp2.rewards + sp2.rent, sp2.wallet, sp2.buyback]).toEqual([(owed2 * 5001n) / 10000n, owed2 - (owed2 * 5001n) / 10000n, 0n]);
+        expect(sp2.rent).toBe((owed2 * 5001n) / 10000n);   // a fresh token: all of it to the rent fund
         const paid = comments(res2.transactions, t2.master.address, holders[4].address, 'Marg tax');
         expect(paid.length).toBe(1);
         expect(paid[0]).toBeGreaterThanOrEqual(sp2.wallet);
@@ -332,7 +362,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
     });
 
     it('rewards are pro-rata to tracked balances across transfers interleaved with accruals; late receivers get nothing earlier', async () => {
-        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, walletBps: 1n });
         const [a, b, c] = holders;
         const owners = [a, b, c];
         // Model, replayed in the master's own transaction order (the tracker view): checkpoints move
@@ -342,6 +372,15 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         const model = new Map<string, number>();
         const shares = new Map<string, bigint>();
         let T = 0n, carry = 0n, accruals = 0;
+        // jetton.tact accrue(): below REWARD_MIN_SHARES the share is carried; at or above it a carry is released
+        // gradually (a tenth per accrual, the whole of it once <= 0.001 Gram). Returns what is distributed now.
+        const accrueModel = (r: bigint): bigint => {
+            if (r <= 0n) return 0n;
+            if (T < REWARD_MIN_SHARES) { carry += r; return 0n; }
+            const release = carry <= toNano('0.001') ? carry : carry / 10n;
+            carry -= release;
+            return r + release;
+        };
         const run = async (p: Promise<SendMessageResult>) => {
             const res = await p;
             expectNoFailures(res);
@@ -358,13 +397,15 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
                     continue;
                 }
                 for (const sp of splitEvents([tx])) {
-                    // rewardsBps = 100%: the gas leftover (extra) also goes to rewards.
-                    const r = sp.rewards + sp.extra + carry;
-                    if (r === 0n) continue;
-                    if (T === 0n) { carry = r; continue; }
-                    carry = 0n;
-                    accruals++;
-                    for (const [o, sh] of shares) model.set(o, (model.get(o) ?? 0) + Number(r) * Number(sh) / Number(T));
+                    // 99.99% rewards + 0.01% wallet: the gas leftover (extra) goes to the tax wallet, and below 1%
+                    // tracked the rewards share too (audit R9B-1/2, R10-1), so nothing is ever carried.
+                    let counted = false;
+                    for (const r of [sp.rewards]) {
+                        const amt = accrueModel(r);
+                        if (amt === 0n) continue;
+                        if (!counted) { accruals++; counted = true; }   // one per split (the extra is a second accrue())
+                        for (const [o, sh] of shares) model.set(o, (model.get(o) ?? 0) + Number(amt) * Number(sh) / Number(T));
+                    }
                 }
             }
             // After each operation the tracker view equals the real balances.
@@ -374,11 +415,13 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             return res;
         };
         // a's buy pays 5 Gram of tax to the master in the same transaction chain, before a's own jettons arrive
-        // (T = 0: carried); b's buy accrues it to a.
+        // (T = 0: to the tax wallet, nothing carried); b's buy accrues its own tax to a.
         const r0 = await run(buy(a, key, toNano('100')));
         expect(splitEvents(r0.transactions).length).toBe(1);
+        expect(carry).toBe(0n);
         await run(buy(b, key, toNano('50')));
         expect(accruals).toBe(1);
+        expect((await master.getGetRewardsData()).carry).toBe(0n);
         // A sub-threshold tax stays in the pool until CollectTax.
         await run(buy(b, key, toNano('1')));
         await run(collect(key));
@@ -397,13 +440,17 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             const m = model.get(h.address.toString())!;
             expect(Math.abs(Number(p) - m)).toBeLessThanOrEqual(accruals + 1e-6 * m);   // ≤ 1 nanoGram per accrual (float model: + 1e-6 rel.)
             const before = await balOf(h.address);
+            // v4: the claim keeps the wallet's storage reserve and carries the rest of its Gram (earlier ack leftovers).
+            const w = await walletOf(master, h.address);
+            const spare = (await balOf(w.address)) - toNano('0.01');
             const res = await claim(master, h);
             expectNoFailures(res);
-            // One payment: the rewards plus the rest of the claim's value (minus fees).
+            // One payment: the rewards plus the rest of the claim's value and the wallet's spare Gram (minus fees).
             const got = comments(res.transactions, master.address, h.address, 'Marg holder rewards');
             expect(got.length).toBe(1);
-            expect(got[0]).toBeGreaterThan(p + toNano('0.05') - toNano('0.02'));
-            expect(got[0]).toBeLessThan(p + toNano('0.05'));
+            expect(got[0]).toBeGreaterThan(p + toNano('0.05') + spare - toNano('0.02'));
+            expect(got[0]).toBeLessThan(p + toNano('0.05') + spare);
+            expect(await balOf(w.address)).toBeGreaterThanOrEqual(toNano('0.01'));
             expect(await pending(master, h.address)).toBe(0n);
             total += p;
             expect(await balOf(h.address)).toBeGreaterThan(before + p - toNano('0.02'));
@@ -415,7 +462,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
     });
 
     it('claim is idempotent; a second claim while one is in flight is rejected; forged reward messages fail', async () => {
-        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
         const [a, b] = holders;
         await buy(a, key, toNano('100'));
         await buy(b, key, toNano('100'));
@@ -448,7 +495,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             { to: master.address, body: beginCell().storeUint(OPS.checkpoint, 32).storeUint(0, 64).storeInt(10n ** 17n, 64).storeAddress(mallory.address).endCell() },
             { to: master.address, body: beginCell().storeUint(OPS.claim, 32).storeUint(0, 64).storeInt(0, 64).storeAddress(mallory.address)
                 .storeCoins(SUPPLY).storeUint(0, 256).storeUint(0, 64).storeCoins(toNano('100')).endCell() },
-            { to: w.address, body: beginCell().store(storeRewardAck({ $$type: 'RewardAck', queryId: 0n, acc: 10n ** 40n, delta: 0n, claim: false, frac: 0n })).endCell() },
+            { to: w.address, body: beginCell().store(storeRewardAck({ $$type: 'RewardAck', queryId: 0n, acc: 10n ** 40n, delta: 0n, claim: false, frac: 0n, owed: 0n })).endCell() },
         ];
         const rd = await master.getGetRewardsData();
         for (const f of fake) {
@@ -462,7 +509,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
     });
 
     it('a bounced checkpoint is re-reported: the wallet stays consistent and SyncRewards repairs the master view', async () => {
-        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+        const { master, key } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, buybackBps: 1n });
         const [a, b] = holders;
         await buy(a, key, toNano('100'));
         const wa = await walletOf(master, a.address);
@@ -567,7 +614,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             const shares = new Map<string, bigint>();
             const earned = new Map<string, bigint>();   // in 1e-27 nanoGram units
             const P = 10n ** 27n;
-            let T = 0n, carry = 0n, accruals = 0;
+            let T = 0n, carry = 0n, accruals = 0, partial = 0, rentIn = 0n;
             const claimedBy = new Map<string, bigint>();
             for (const tx of log) {
                 if (!dst(tx)?.equals(master.address) || !txOk(tx)) continue;
@@ -581,19 +628,33 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
                     T += delta;
                     if (op === OPS.claim) {
                         // paid = owed + (acked * (acc - lastAcc) + frac) / SCALE, acc from the ack it sent
-                        const acked = b.loadCoins(), lastAcc = b.loadUintBig(256), frac = b.loadUintBig(64), owed = b.loadCoins();
+                        // v4: acked is a signed int128 (rewards on max(acked, 0))
+                        const ackedRaw = b.loadIntBig(128), lastAcc = b.loadUintBig(256), frac = b.loadUintBig(64), owed = b.loadCoins();
+                        const acked = ackedRaw > 0n ? ackedRaw : 0n;
                         const ack = [...tx.outMessages.values()].find((m) => m.body.beginParse().preloadUint(32) === OPS.ack)!.body.beginParse();
                         ack.loadUint(32); ack.loadUint(64);
                         const acc = ack.loadUintBig(256);
-                        const paid = owed + (acked * (acc - lastAcc) + frac) / SCALE;
+                        ack.loadIntBig(64); ack.loadBit(); ack.loadUintBig(64);
+                        const left = ack.loadCoins();               // v4: what the master could not pay yet (stays owed)
+                        const due = owed + (acked * (acc - lastAcc) + frac) / SCALE;
+                        expect(left).toBeLessThanOrEqual(due);
+                        partial += left > 0n ? 1 : 0;
+                        const paid = due - left;
                         claimedBy.set(owner, (claimedBy.get(owner) ?? 0n) + paid);
                     }
                 } else {
                     const sp = splitEvents([tx]);
-                    if (sp.length === 0 || sp[0].rewards === 0n) continue;
-                    const r = sp[0].rewards + carry;
-                    if (T === 0n) { carry = r; continue; }
-                    carry = 0n;
+                    if (sp.length === 0) continue;
+                    // v4: the rewards share first tops up the master's rent fund (amount = rewards + rent + wallet + buyback).
+                    expect(sp[0].rewards + sp[0].rent + sp[0].wallet + sp[0].buyback).toBe(sp[0].amount);
+                    rentIn += sp[0].rent;
+                    // v4: below REWARD_MIN_SHARES the rewards share was re-routed to the bucket (buyback on): rewards 0.
+                    if (sp[0].rewards === 0n) continue;
+                    expect(T).toBeGreaterThanOrEqual(REWARD_MIN_SHARES);
+                    // jetton.tact accrue() (no carry on a token with a buyback: the share is never carried).
+                    const release = carry <= toNano('0.001') ? carry : carry / 10n;
+                    carry -= release;
+                    const r = sp[0].rewards + release;
                     accruals++;
                     for (const [o, s] of shares) earned.set(o, (earned.get(o) ?? 0n) + (r * s * P) / T);
                 }
@@ -619,14 +680,20 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
             expect(rd.claimed).toBe(claimedAll);
             expect(claimedAll).toBeLessThanOrEqual(rd.accrued);
             const bs = await master.getGetBuybackStatus();
-            expect(await balOf(master.address)).toBeGreaterThanOrEqual(rd.accrued + rd.carry - rd.claimed + bs.balance);
+            expect(await balOf(master.address)).toBeGreaterThanOrEqual(rd.accrued + rd.carry - rd.claimed + rd.rentFund + bs.balance);
+            // The rent fund: filled from the rewards share up to RENT_FUND_TARGET (re-topped after the master's rent
+            // is absorbed from it), never more than it received; what left it is only the master's own rent.
+            expect(rd.rentFund).toBeLessThanOrEqual(C.RENT_FUND_TARGET);
+            expect(rd.rentFund).toBeLessThanOrEqual(rentIn);
+            expect(rentIn).toBeGreaterThanOrEqual(C.RENT_FUND_TARGET);
+            expect(rentIn - rd.rentFund).toBeLessThan(toNano('0.001'));
             // Supply accounting: burns (holders + buybacks) reduce totalSupply exactly.
             const jd = await master.getGetJettonData();
             const routerBal = await jBal(master, router.address);
             expect(jd.totalSupply).toBe(sumBal + routerBal + (await jBal(master, master.address)));
             // eslint-disable-next-line no-console
             console.log(`seed ${seed}: ${log.length} txs, ${accruals} accruals, accrued ${rd.accrued}, claimed ${claimedAll}, ` +
-                `buybacks ${bs.count}, burned ${bs.burned}`);
+                `buybacks ${bs.count}, burned ${bs.burned}, rent fund in ${rentIn} (now ${rd.rentFund}), partial claims ${partial}`);
         });
     }
 
@@ -728,66 +795,73 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         expect((await master.getGetJettonData()).totalSupply).toBe(s2);
     });
 
-    it('keeper bot: Harvest is paid from the bucket (rate-limited), refunds the caller, collects the sub-threshold tax and auto-runs the buyback', async () => {
+    it('keeper bot (v4, audit R7B-2): Harvest is always caller-paid (rest refunded), never touches the bucket, collects the sub-threshold tax and auto-runs the buyback', async () => {
+        const HV = C.HARVEST_VALUE + C.KEEPER_FEE;
         const { master, key, pool } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 2000n, buybackBps: 8000n });
         let r0 = await buy(holders[0], key, toNano('200'));       // 10 Gram tax, paid in the swap: 8 into the bucket (< 26 cap, > 1 min) -> buyback runs
         expectNoFailures(r0);
         let st = await master.getGetBuybackStatus();
         expect(st.count).toBe(1n);
-        expect(st.harvestDue).toBe(st.balance >= C.HARVEST_VALUE + C.KEEPER_FEE);
+        expect(st.harvestDue).toBe(false);                         // v4: no bucket-paid harvest, ever
+        expect(await master.getGetHarvestValue()).toBe(HV);
         chain.now = T0 + 10;
         expectNoFailures(await buy(holders[1], key, toNano('300')));   // 15 Gram paid and split; inside the interval: no buyback
         expect((await master.getGetBuybackStatus()).count).toBe(1n);
         expectNoFailures(await buy(holders[2], key, toNano('1')));     // 0.05 Gram: below TAX_MIN_PAYOUT, stays in the pool
         const owed = (await pool.getGetPoolState()).taxFees;
         expect(owed).toBe(toNano('0.05'));
-        // harvestLast = 0, so the first harvest is due right away; the buyback is due after the interval.
         chain.now = T0 + C.INTERVAL;
         st = await master.getGetBuybackStatus();
-        expect([st.harvestDue, st.wouldRun]).toEqual([true, true]);
+        expect([st.harvestDue, st.wouldRun]).toEqual([false, true]);
         const bot = holders[4];
+        // Below HARVEST_VALUE + KEEPER_FEE: refused, the bucket untouched.
+        expect((await master.send(bot.getSender(), { value: HV - 1n }, { $$type: 'Harvest', queryId: 4n })).transactions)
+            .toHaveTransaction({ to: master.address, success: false });
+        expect((await master.getGetBuybackStatus()).balance).toBe(st.balance);
         const bb = await balOf(bot.address);
         const bal0 = st.balance;
-        const res = await master.send(bot.getSender(), { value: toNano('0.03') }, { $$type: 'Harvest', queryId: 5n });
+        const res = await master.send(bot.getSender(), { value: toNano('0.5') }, { $$type: 'Harvest', queryId: 5n });
         expectNoFailures(res);
         // The harvested tax, then (in the buyback swap the payout triggered) the buyback's own buy tax.
         const bbSwap = swapEvents(res).filter((e) => e.fromUser.equals(master.address));
         expect(bbSwap.length).toBe(1);
         expect(gramPayouts(res, master.address).filter((x) => x.reason === REASON.TAX).map((x) => x.amount)).toEqual([owed, bbSwap[0].tax]);
         expect((await pool.getGetPoolState()).taxFees).toBe(0n);
-        expect(bb - (await balOf(bot.address))).toBeLessThan(toNano('0.001'));   // whole value refunded: the bot pays only its own send fee
+        // The bot pays HARVEST_VALUE + KEEPER_FEE at most; the rest of its 0.5 comes back.
+        const cost = bb - (await balOf(bot.address));
+        expect(cost).toBeLessThanOrEqual(HV + toNano('0.002'));
+        expect(cost).toBeGreaterThan(toNano('0.01'));
         st = await master.getGetBuybackStatus();
         expect(st.count).toBe(2n);                      // the payout ran the buyback
         const [sp] = splitEvents(res.transactions);
         expect(sp.amount).toBe(owed);
-        expect(st.nextHarvestAt).toBe(BigInt(T0 + C.INTERVAL + C.HARVEST_INTERVAL));
-        // A second harvest inside the interval is rejected (the bot can read harvestDue first).
-        expect(st.harvestDue).toBe(false);
-        const r2 = await master.send(bot.getSender(), { value: toNano('0.03') }, { $$type: 'Harvest', queryId: 6n });
+        // A second harvest inside HARVEST_CALLER_INTERVAL is rejected.
+        expect(st.nextCallerHarvestAt).toBe(BigInt(T0 + C.INTERVAL + C.HARVEST_CALLER_INTERVAL));
+        const r2 = await master.send(bot.getSender(), { value: toNano('0.5') }, { $$type: 'Harvest', queryId: 6n });
         expect(r2.transactions).toHaveTransaction({ to: master.address, success: false });
         // eslint-disable-next-line no-console
-        console.log(`harvest: bucket ${bal0} -> ${st.balance}, split buyback ${sp.buyback} + extra ${sp.extra}, buybacks ${st.count}`);
+        console.log(`harvest: bucket ${bal0} -> ${st.balance} (after a buyback), split buyback ${sp.buyback} + extra ${sp.extra}, buybacks ${st.count}, bot cost ${cost}`);
 
-        // Drain bound, on a token whose buyback pays no tax (sell tax only): a due harvest that finds no tax
-        // costs the bucket at most HARVEST_VALUE + KEEPER_FEE, and in practice only the fees.
+        // Drain bound, on a token whose buyback pays no tax (sell tax only): harvests that find no tax cost the
+        // bucket nothing (the caller pays; the master's leftover only adds to it).
         const t2 = await launch({ buyTaxBps: 0n, sellTaxBps: 500n, buybackBps: 10000n });
         await chain.sendMessage(internal({ from: t2.pool.address, to: t2.master.address, value: toNano('3'),
             body: beginCell().store(storeGramPayoutL({ $$type: 'GramPayout', queryId: 0n, reason: 14n, amount: toNano('3'), payload: null })).endCell() }));
         const s2 = await t2.master.getGetBuybackStatus();
         expect(s2.count).toBe(1n);
-        expect(s2.harvestDue).toBe(true);
-        const r3 = await t2.master.send(bot.getSender(), { value: toNano('0.03') }, { $$type: 'Harvest', queryId: 7n });
-        expectNoFailures(r3);
-        // eslint-disable-next-line no-console
-        console.log(`harvest chains master gas: [${res.transactions.filter((tx) => dst(tx)?.equals(master.address)).map((tx) => `${opOf(tx)?.toString(16)}:${(tx.description as any).computePhase.gasUsed}`).join(' ')}] ` +
-            `[${r3.transactions.filter((tx) => dst(tx)?.equals(t2.master.address)).map((tx) => `${opOf(tx)?.toString(16)}:${(tx.description as any).computePhase.gasUsed}`).join(' ')}]`);
+        let paid = 0n;
+        for (let i = 0; i < 5; i++) {
+            chain.now! += C.HARVEST_CALLER_INTERVAL;
+            const b0 = await balOf(bot.address);
+            const r3 = await t2.master.send(bot.getSender(), { value: HV }, { $$type: 'Harvest', queryId: 7n });
+            expectNoFailures(r3);
+            paid += b0 - (await balOf(bot.address));
+        }
         const s3 = await t2.master.getGetBuybackStatus();
         expect(s3.count).toBe(1n);
-        const cost = s2.balance - s3.balance;
-        expect(cost).toBeGreaterThan(0n);
-        expect(cost).toBeLessThanOrEqual(C.HARVEST_VALUE + C.KEEPER_FEE);
+        expect(s3.balance).toBeGreaterThanOrEqual(s2.balance);
         // eslint-disable-next-line no-console
-        console.log(`harvest with no tax: bucket cost ${cost} (cap ${C.HARVEST_VALUE + C.KEEPER_FEE})`);
+        console.log(`5 harvests with no tax: bucket ${s2.balance} -> ${s3.balance}, caller paid ${paid}`);
     });
 
     it('buyback uses the DEX max crossings with allowPartial: BUYBACK_GAS covers the Router minimum for it (launch key: platform payout; taxed: tax payout)', async () => {
@@ -871,7 +945,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         console.log(`buyback past 30 dust positions (spacing 10): swapped ${sw[0].amountIn}, crossings ${sw[0].crossings}, burned ${sw[0].amountOut}`);
     });
 
-    it('Harvest works on every split: caller-paid (>= HARVEST_VALUE + KEEPER_FEE, rest refunded, 60 s spacing) when the bucket cannot pay', async () => {
+    it('Harvest works on every split: caller-paid (>= HARVEST_VALUE + KEEPER_FEE, rest refunded, 60 s spacing; v4: always caller-paid)', async () => {
         const bot = holders[4];
         const HV = C.HARVEST_VALUE + C.KEEPER_FEE;
         const harvest = (m: SandboxContract<LaunchJetton>, value: bigint, q = 5n) => m.send(bot.getSender(), { value }, { $$type: 'Harvest', queryId: q });
@@ -879,8 +953,8 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         const t0 = await launch();
         expect((await harvest(t0.master, toNano('0.5'))).transactions).toHaveTransaction({ to: t0.master.address, success: false });
 
-        // "Holders" split (no buyback bucket at all).
-        const { master, key, pool } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 10000n });
+        // Rewards + wallet split, no buyback bucket (v4 audit R10-1: holder rewards need a buyback or wallet share).
+        const { master, key, pool } = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 9999n, walletBps: 1n, taxWallet: mallory.address });
         expect(await master.getGetHarvestValue()).toBe(HV);
         // 10 Gram of tax is paid in the swap itself; Harvest is for what stays below TAX_MIN_PAYOUT.
         const rb = await buy(holders[0], key, toNano('200'));
@@ -891,15 +965,25 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         expect((await harvest(master, toNano('0.03'))).transactions).toHaveTransaction({ to: master.address, success: false });
         expect((await harvest(master, HV - 1n)).transactions).toHaveTransaction({ to: master.address, success: false });
         const b0 = await balOf(bot.address);
+        const accOf = async () => { const r = await master.getGetRewardsData(); return r.accrued + r.carry; };
+        const acc0 = await accOf();
         let res = await harvest(master, toNano('1'));
         expectNoFailures(res);
+        // v4 (cloud review): the leftover of the caller-paid CollectTax (the pool's tagged excess) goes to the tax
+        // wallet on a token without buyback, never to the creator.
+        expect(res.transactions.filter((tx) => src(tx)?.equals(master.address) && dst(tx)?.equals(creator.address)).length).toBe(0);
         expect(gramPayouts(res, master.address).filter((x) => x.reason === REASON.TAX).map((x) => x.amount)).toEqual([owed]);
         const cost = b0 - (await balOf(bot.address));
         expect(cost).toBeLessThanOrEqual(HV + toNano('0.002'));      // the bot pays at most HARVEST_VALUE + KEEPER_FEE
         expect(cost).toBeGreaterThanOrEqual(HV - toNano('0.001'));
         const [sp] = splitEvents(res.transactions);
-        expect([sp.amount, sp.rewards]).toEqual([owed, owed]);
-        expect((await master.getGetRewardsData()).accrued).toBeGreaterThanOrEqual(sp.rewards);
+        expect(sp.amount).toBe(owed);
+        expect(sp.rewards + sp.wallet + sp.rent + sp.buyback).toBe(owed);
+        expect(sp.rewards).toBeGreaterThan((owed * 99n) / 100n);
+        expect((await accOf()) - acc0).toBe(sp.rewards);           // the leftover is not accrued
+        const toTw = comments(res.transactions, master.address, mallory.address, 'Marg tax').reduce((a, x) => a + x, 0n);
+        expect(toTw).toBeGreaterThan(sp.wallet);                   // the split's wallet share + the swept leftover
+        expect(toTw).toBeLessThan(sp.wallet + HV);
         expect((await pool.getGetPoolState()).taxFees).toBe(0n);
         // 60 s spacing between caller-paid harvests.
         await buy(holders[1], key, toNano('1'));
@@ -913,7 +997,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         expectNoFailures(res);
         expect(gramPayouts(res, master.address).filter((x) => x.reason === REASON.TAX).map((x) => x.amount)).toEqual([owed]);
         // eslint-disable-next-line no-console
-        console.log(`caller-paid harvest (holders split): bot cost ${cost}, master gas [${res.transactions.filter((tx) => dst(tx)?.equals(master.address)).map((tx) => `${opOf(tx)?.toString(16)}:${(tx.description as any).computePhase.gasUsed}`).join(' ')}]`);
+        console.log(`caller-paid harvest (rewards + wallet split): bot cost ${cost}, master gas [${res.transactions.filter((tx) => dst(tx)?.equals(master.address)).map((tx) => `${opOf(tx)?.toString(16)}:${(tx.description as any).computePhase.gasUsed}`).join(' ')}]`);
 
         // Wallet split: the tax wallet is paid by a caller-paid harvest.
         const tw = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, walletBps: 10000n, taxWallet: mallory.address });
@@ -923,39 +1007,41 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         res = await harvest(tw.master, toNano('0.3'));
         expectNoFailures(res);
         const paid = comments(res.transactions, tw.master.address, mallory.address, 'Marg tax');
-        expect(paid.length).toBe(1);
-        expect(paid[0]).toBeGreaterThanOrEqual(owed);
+        // v4: two payments to the tax wallet: the split (the tax) and the swept CollectTax leftover; none to the creator.
+        expect(paid.length).toBe(2);
+        expect(paid.some((x) => x >= owed)).toBe(true);
+        expect(paid.reduce((a, x) => a + x, 0n)).toBeGreaterThan(owed);
+        expect(res.transactions.filter((tx) => src(tx)?.equals(tw.master.address) && dst(tx)?.equals(creator.address))).toEqual([]);
 
-        // Buyback split: bucket-paid when due (caller refunded); inside HARVEST_INTERVAL a caller-paid
-        // harvest still works after 60 s and does not charge the bucket.
+        // Buyback split (v4, audit R7B-2): also caller-paid; too little attached is refused (no bucket-paid
+        // fallback); 60 s spacing; the bucket only gains.
         const tb = await launch({ buyTaxBps: 500n, sellTaxBps: 500n, rewardsBps: 5000n, buybackBps: 5000n });
         expectNoFailures(await buy(holders[0], tb.key, toNano('200')));   // 10 Gram paid in the swap: 5 into the bucket, buyback runs
         expect((await tb.master.getGetBuybackStatus()).count).toBe(1n);
         await buy(holders[1], tb.key, toNano('200'));
-        st = await tb.master.getGetBuybackStatus();
-        expect(st.harvestDue).toBe(true);
-        const B = chain.now!;
-        let bb = await balOf(bot.address);
-        expectNoFailures(await harvest(tb.master, toNano('0.03')));   // bucket-paid, caller's 0.03 refunded
-        expect(bb - (await balOf(bot.address))).toBeLessThan(toNano('0.001'));
+        await buy(holders[2], tb.key, toNano('1'));         // 0.05 Gram left in the pool for the harvest
         st = await tb.master.getGetBuybackStatus();
         expect(st.harvestDue).toBe(false);
-        await buy(holders[2], tb.key, toNano('200'));
-        await buy(holders[2], tb.key, toNano('1'));         // 0.05 Gram left in the pool for the next harvest
-        expect((await harvest(tb.master, toNano('0.5'))).transactions).toHaveTransaction({ to: tb.master.address, success: false });  // < 60 s
-        chain.now = B + 60;
-        expect((await harvest(tb.master, toNano('0.03'))).transactions).toHaveTransaction({ to: tb.master.address, success: false });  // bucket not due, too little attached
         const bal0 = st.balance;
+        expect((await harvest(tb.master, toNano('0.03'))).transactions).toHaveTransaction({ to: tb.master.address, success: false });
+        expect((await tb.master.getGetBuybackStatus()).balance).toBe(bal0);
         owed = (await tb.pool.getGetPoolState()).taxFees;
         expect(owed).toBe(toNano('0.05'));
-        bb = await balOf(bot.address);
+        const B = chain.now!;
+        let bb = await balOf(bot.address);
         res = await harvest(tb.master, toNano('0.5'));
         expectNoFailures(res);
         expect(gramPayouts(res, tb.master.address).filter((x) => x.reason === REASON.TAX).map((x) => x.amount)).toEqual([owed]);
         expect(bb - (await balOf(bot.address))).toBeLessThanOrEqual(HV + toNano('0.002'));
         st = await tb.master.getGetBuybackStatus();
         expect(st.balance).toBeGreaterThan(bal0);           // the bucket only gained (its buyback share + gas leftover)
-        expect(st.nextHarvestAt).toBe(BigInt(B + 60 + C.HARVEST_INTERVAL));
+        expect(st.nextCallerHarvestAt).toBe(BigInt(B + C.HARVEST_CALLER_INTERVAL));
+        expect((await harvest(tb.master, toNano('0.5'))).transactions).toHaveTransaction({ to: tb.master.address, success: false });  // < 60 s
+        chain.now = B + C.HARVEST_CALLER_INTERVAL;
+        bb = await balOf(bot.address);
+        expectNoFailures(await harvest(tb.master, toNano('0.5')));                  // nothing left to collect: the caller pays, the bucket does not
+        expect(bb - (await balOf(bot.address))).toBeLessThanOrEqual(HV + toNano('0.002'));
+        expect((await tb.master.getGetBuybackStatus()).balance).toBeGreaterThanOrEqual(st.balance);
     });
 
     it('sandwich bound: a capped buyback moves the price ~2% at most; front-run + back-run loses money to fees and taxes', async () => {
@@ -987,7 +1073,7 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
 
     it('no-tax token: plain wallets, no master in a transfer chain; gas of a transfer with and without rewards', async () => {
         const plain = await launch({});
-        const taxed = await launch({ buyTaxBps: 300n, sellTaxBps: 300n, rewardsBps: 10000n });
+        const taxed = await launch({ buyTaxBps: 300n, sellTaxBps: 300n, rewardsBps: 9999n, buybackBps: 1n });
         const [a, b] = holders;
         await buy(a, plain.key, toNano('50'));
         await buy(a, taxed.key, toNano('50'));
@@ -1027,8 +1113,9 @@ describe('Marg direct launch: tax split, holder rewards, buyback and burn, anti-
         // At the mainnet basis of 400 nanoGram/gas (the sandbox charges ~66.7): gas * 400 + forward fees, x1.5 margin.
         const g = (tx: BlockchainTransaction) => BigInt((tx.description as any).computePhase.gasUsed);
         const roundTrip = (g(cpTx[0]) + g(ackTx[0])) * 400n + toNano('0.0015');
-        expect(g(cpTx[0]) * 3n / 2n).toBeLessThanOrEqual(C.CP_MASTER_GAS);
-        expect(g(ackTx[0]) * 2n).toBeLessThanOrEqual(C.ACK_GAS);
+        // Within the budgets; the 1.5x margins (worst case, vault token) are measured in rewards-hardening.spec.ts.
+        expect(g(cpTx[0])).toBeLessThanOrEqual(C.CP_MASTER_GAS);
+        expect(g(ackTx[0]) * 3n / 2n).toBeLessThanOrEqual(C.ACK_GAS);
         const rv = await taxed.master.getGetRewardValues();
         expect(rv).toEqual(await wa.getGetRewardValues());
         // Every checkpoint message carried at least what the master requires, and every ack was processed.

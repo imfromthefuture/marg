@@ -184,7 +184,7 @@ describe('PLATFORM FEE', () => {
         const carried = (await pool.getGetPoolState()).platformFees;
         expect(carried).toBe(toNano('0.007'));
         // reserveForCaller paths: protocol collect, tax collect on an untaxed key, a Gram donation.
-        let res = await d.router.send(d.carol.getSender(), { value: toNano('0.3') }, { $$type: 'CollectProtocolFees', queryId: 3n, key: pk(key) });
+        let res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 3n, key: pk(key) });
         expectNoFailures(res);
         expect(gramPayouts(res, d.treasury.address).filter((x) => x.reason === REASON.PROTOCOL_FEE).map((x) => x.amount)).toEqual([sim.protocolFees0]);
         sim.protocolFees0 = 0n;
@@ -214,27 +214,34 @@ describe('PLATFORM FEE', () => {
         expect(st.platformFees).toBe(0n);
     });
 
-    it('SetPlatformFee: admin only, any rate in [0, 100]; applies to existing pools at once; get_quote2 is exact before the next swap', async () => {
-        let res = await setFee(d.bob, 50n);
+    it('SetPlatformFee: admin only, any rate in [85, 100] (v4 floor, audits R8B-2 / R9B-6); applies to existing pools at once; get_quote2 is exact before the next swap', async () => {
+        let res = await setFee(d.bob, 90n);
         expect(failedAt(res, d.router.address).length).toBe(1);
         res = await setFee(d.admin, 101n);
         expect(failedAt(res, d.router.address).length).toBe(1);
-        expect(await d.router.getGetPlatformFee()).toBe(100n);
+        // Below the floor: refused ("Fee below floor"), the rate is unchanged.
+        for (const bad of [0n, 30n, 75n, 84n]) {
+            res = await setFee(d.admin, bad);
+            expect(failedAt(res, d.router.address).length).toBe(1);
+            expect(await d.router.getGetPlatformFee()).toBe(100n);
+        }
 
-        expectNoFailures(await setFee(d.admin, 30n));
-        expect(await d.router.getGetPlatformFee()).toBe(30n);
+        expectNoFailures(await setFee(d.admin, 90n));
+        expect(await d.router.getGetPlatformFee()).toBe(90n);
         // The pool still shows the last-seen rate in get_quote; get_quote2 with the Router's rate is exact.
         const amount = toNano('20');
         const stale = await pool.getGetQuote(true, amount, 0n, 24n, 0n, false);
         expect(stale.platformFee).toBe((amount * 100n) / BPS);
         const { exp } = await swapChecked(sim, pool, key, d.bob, true, amount);
-        expect(exp.plat).toBe((amount * 30n) / BPS);
-        expect((await pool.getGetPoolState()).platformBps).toBe(30n);
-        expect((await pool.getGetQuote(true, amount, 0n, 24n, 0n, false)).platformFee).toBe((amount * 30n) / BPS);
+        expect(exp.plat).toBe((amount * 90n) / BPS);
+        expect((await pool.getGetPoolState()).platformBps).toBe(90n);
+        expect((await pool.getGetQuote(true, amount, 0n, 24n, 0n, false)).platformFee).toBe((amount * 90n) / BPS);
 
-        expectNoFailures(await setFee(d.admin, 0n));
+        // Exactly the floor is accepted and charged.
+        expectNoFailures(await setFee(d.admin, 85n));
         const z = await swapChecked(sim, pool, key, d.bob, false, toNano('100000'));
-        expect([z.exp.plat, z.exp.platPaid]).toEqual([0n, 0n]);
+        expect(z.exp.plat).toBeGreaterThan(0n);
+        expect((await pool.getGetPoolState()).platformBps).toBe(85n);
 
         // Raising back is allowed (up to the cap).
         expectNoFailures(await setFee(d.admin, 100n));

@@ -524,6 +524,12 @@ floors):
 
 Mints and burns do not touch the volatility state.
 
+**Known and accepted (audit R2-L1 residual = R4B-6):** a trader who keeps making alternating one-bin
+swaps inside every filter period keeps `lastTs` fresh, so the references (`idxRef`, `volRef`) are never
+reset and the variable fee stays high. It is capped by `maxVolAcc` (about 0.49% on the spacing-10
+launch preset), the trader pays the swap fee every 10–30 s for it, and nobody profits on launch pools
+(the fee goes to the locked position). This is Meteora's behaviour and is kept by design.
+
 ### 5.4 Hook-set fee (FEE_CONTROL plugin)
 - Requires the key flag `HOOK_FEE_CONTROL`. The hook sends
   `HookSetFee{feePips ∈ [key.ext.hookFeeMin, key.ext.hookFeeMax]}`.
@@ -848,7 +854,7 @@ and leave the pool one-sided forever.
 
 ### 6.9 Protocol and hook fee collection
 - `CollectProtocolFees{queryId, key}` can be sent to the Router by **anyone**, with value
-  ≥ `COLLECT_GAS`. The Router sends `PoolCollectProtocol{treasury = self.treasury}` (bounce:true,
+  ≥ `PROTOCOL_COLLECT_GAS` (v4: 0.35, it may pay two jetton legs; the unused part comes back). The Router sends `PoolCollectProtocol{treasury = self.treasury}` (bounce:true,
   no StateInit; a missing pool bounces and the Router swallows it). The Pool pays
   `protocolFees0/1` to that treasury, zeroes them, and sends the excess to the caller.
 - `HookCollectFees{queryId}` goes from `key.ext.hook` directly to the Pool (`require` the sender).
@@ -859,18 +865,20 @@ and leave the pool one-sided forever.
 - `AddFeePreset` for a new `tickSpacing` only (refused if it exists; caps checked);
 - `SetProtocolShare(key, bps ≤ 2500)` through Router → `PoolSetProtocolShare` (the Pool re-checks
   the cap);
-- `SetCreationPaused` (blocks only *initialization* of new pools; launch and graduation keys
-  bypass it, §15.8);
+- `SetCreationPaused` (blocks only *initialization* of new plain pools by a mint; `LaunchPayload` and
+  `GraduatePayload` create their pools anyway (`allowInit: true`), §15.8, audit R6B-I2);
 - `SetTreasury`;
 - 2-step `TransferAdmin` / `ClaimAdmin`;
-- `WithdrawRouterExcess` (Router Gram above `ROUTER_MIN_STORAGE`, to the treasury).
+- `WithdrawRouterExcess` (Router Gram to the treasury; v3 keeps `ROUTER_MIN_STORAGE` 0.05, v4 keeps
+  `ROUTER_RENT_RESERVE` 0.55. Operations keep every Router at 1 Gram or more, audit R4A-2).
 
 **Cannot:**
 - touch reserves, ticks, positions or locked positions;
 - pause swaps, mints or withdrawals;
 - change an existing pool's preset, launch fee, hook or caps;
 - upgrade code;
-- rescue jettons.
+- rescue jettons (jettons sent to the Router without a DEX payload, or with less than 0.08 Gram of
+  forward value, stay in its wallet for good: audit R4A-5, documented in the README).
 
 
 ### 6.11 Direct launch (launchpad entry without a curve, 2026-11-12)
@@ -954,7 +962,7 @@ automatically.
   any key with an initializer) of Gram pools. Plain keys, and hook keys without an initializer, pay
   nothing. Tests read the switch from `constants.tact` (`model.ts platformCharged`).
 - **Rate:** `Router.platformBps` (uint16), initially `PLATFORM_FEE_CAP_BPS` = 100 (1%). The admin
-  sets it with `SetPlatformFee{queryId, bps}` (`0x4d48001d`), any value in `[0, 100]` (lower or
+  sets it with `SetPlatformFee{queryId, bps}` (`0x4d48001d`), any value in `[0, 100]` (v4: `[85, 100]`) (lower or
   raise; never above the code cap). The Router puts the current rate and recipient (`treasury`) into
   every `PoolSwap` and `PoolLaunch` (appended `platformBps: uint16, platformTo: Address`), so a
   change applies to every pool on its next swap. The Pool stores the last rate it saw

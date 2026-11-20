@@ -6,6 +6,8 @@ import { storeCreateToken, type FactoryData } from '../../../launch/build/Launch
 import { buildOnchainContent, client, explorer, fmtCompact, fmtTon, q } from '../ton';
 import { buyMove, devBuyShare, LAUNCH_FACTORY, launchFactory, loadFactoryData, SNIPE_MAX_PCT, SNIPE_MAX_SEC, TAX_MAX_PCT, TAX_MIN_PCT, TIER_INFO, type TierKey } from '../launch';
 import { TokenImage } from './Home';
+
+const CREATE_MARGIN = toNano('0.05');
 import { useGramUsd } from '../usd';
 import { ImageUpload } from '../ImageUpload';
 
@@ -41,7 +43,7 @@ const SPLITS: { key: SplitKey; label: string; hint: string; color: string }[] = 
     { key: 'buyback', label: 'Buyback & burn', hint: 'Buys the token on its pool and burns it, automatically and in small steps.', color: '#f59e0b' },
 ];
 const SPLIT_PRESETS: [string, [number, number, number]][] = [
-    ['Even', [34, 33, 33]], ['Holders', [100, 0, 0]], ['Burn', [0, 0, 100]], ['Wallet', [0, 100, 0]],
+    ['Even', [34, 33, 33]], ['Holders', [80, 0, 20]], ['Burn', [0, 0, 100]], ['Wallet', [0, 100, 0]],
 ];
 
 const pctNum = (s: string) => { const n = Number(s.replace(',', '.')); return Number.isFinite(n) ? n : 0; };
@@ -144,7 +146,8 @@ export function Create() {
         rewards: parsePctBps(split.rewards, 0, 100), wallet: parsePctBps(split.wallet, 0, 100), buyback: parsePctBps(split.buyback, 0, 100),
     };
     const splitSum = (splitBps.rewards ?? 0) + (splitBps.wallet ?? 0) + (splitBps.buyback ?? 0);
-    const splitValid = !anyTax || (splitBps.rewards !== null && splitBps.wallet !== null && splitBps.buyback !== null && splitSum === 10_000);
+    const splitValid = !anyTax || (splitBps.rewards !== null && splitBps.wallet !== null && splitBps.buyback !== null && splitSum === 10_000
+        && ((splitBps.rewards ?? 0) === 0 || (splitBps.wallet ?? 0) + (splitBps.buyback ?? 0) > 0));
     const taxWallet = (() => {
         if (!anyTax || taxTo.trim() === '') return null;
         try {
@@ -172,8 +175,9 @@ export function Create() {
 
     const valid = vault !== null && image.length > 0 && name.trim().length > 0 && /^[A-Za-z0-9]{1,10}$/.test(symbol)
         && devBuyNano >= 0n && taxValid && snipeVal !== null;
-    // Only the factory's own get_create_value for this exact dev buy is sent.
-    const total = createValue;
+    // The factory's own get_create_value2 for this exact dev buy, plus a margin so a gas-price rise between
+    // this page and the launch does not make the factory refuse it (audit R7A-3). The unused gas comes back.
+    const total = createValue !== null ? createValue + CREATE_MARGIN : null;
 
     async function launch() {
         if (!wallet) return tonConnect.openModal();
@@ -378,8 +382,8 @@ export function Create() {
                                 </div>
                             </div>
                         ))}
-                        <div className={`split-sum ${splitSum === 10_000 ? 'ok' : 'bad'}`}>
-                            Total {splitSum / 100}% {splitSum === 10_000 ? '✓' : '· must be 100%'}
+                        <div className={`split-sum ${splitValid ? 'ok' : 'bad'}`}>
+                            Total {splitSum / 100}% {splitSum !== 10_000 ? '· must be 100%' : (splitBps.rewards ?? 0) > 0 && (splitBps.wallet ?? 0) + (splitBps.buyback ?? 0) === 0 ? '· holder rewards need a buyback or wallet share' : '✓'}
                         </div>
 
                         {(splitBps.wallet ?? 0) > 0 && (
@@ -394,12 +398,19 @@ export function Create() {
                             Taxes and the split are fixed at launch and can't be changed later. With holder rewards on, token
                             transfers cost a little more gas (about 0.1 Gram), because rewards are tracked on every transfer.
                         </span>
+                        {(splitBps.rewards ?? 0) > 0 && (
+                            <span className="dim small">
+                                Holder rewards start once holders together own at least 1% of the supply (tokens in the pool
+                                don't count). Until then the rewards share goes to the buyback, else the tax wallet, so holder rewards need a
+                                buyback or wallet share. A dev buy of at least 1% of the supply starts rewards at once.
+                            </span>
+                        )}
                     </div>
                 )}
 
                 <div className="summary">
                     <span className="dim">You pay</span>
-                    <span>{total !== null ? `${fmtTon(total)} Gram` : '—'} <span className="dim small">(unused gas is refunded)</span></span>
+                    <span>{total !== null ? `${fmtTon(total)} Gram` : '—'} <span className="dim small">(includes a 0.05 Gram gas margin; unused gas is refunded)</span></span>
                 </div>
 
                 <button className="button primary wide" disabled={!LAUNCH_FACTORY || (!!wallet && (!valid || total === null))} onClick={launch}>

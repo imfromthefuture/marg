@@ -618,7 +618,7 @@ describe('v2 smoke: other entry points (graduation, hooks, jetton/jetton via Min
         // Anyone may trigger protocol fee collection; the fees only ever go to the treasury.
         const key = { $$type: 'PoolKey' as const, token0: s.key.token0, token1: s.key.token1, tickSpacing: 60n, ext: null };
         const tBefore = await d.jBal(d.jA, d.treasury.address);
-        res = await d.router.send(d.carol.getSender(), { value: toNano('0.3') }, { $$type: 'CollectProtocolFees', queryId: 0n, key });
+        res = await d.router.send(d.carol.getSender(), { value: toNano('0.35') }, { $$type: 'CollectProtocolFees', queryId: 0n, key });
         expectNoFailures(res);
         expect(await d.jBal(d.jA, d.treasury.address)).toBe(tBefore + q.protocolFee);
         const after = await pool.getGetPoolState();

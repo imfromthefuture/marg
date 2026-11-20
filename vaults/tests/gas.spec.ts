@@ -4,10 +4,10 @@
 
 import { SendMessageResult } from '@ton/sandbox';
 import { Address, beginCell, toNano } from '@ton/core';
-import { stepParallel, VaultFx, GRAM_1, USDT, DEPOSIT_GAS, WITHDRAW_GAS, REBALANCE_GAS, OPD, expectNoFailures, computeGas, gramPaidTo } from './fixture';
+import { stepParallel, VaultFx, GRAM_1, USDT, DEPOSIT_GAS, WITHDRAW_GAS, REBALANCE_GAS, RECOVERY_DELAY, DEP_TIMEOUT, OPD, expectNoFailures, computeGas, gramPaidTo } from './fixture';
 import { gramPayouts, REASON, msg, drain } from '../../dex/v2/tests/helpers';
 import { storeJettonBurn } from '../build/Vault_VaultWallet';
-import { storeBurnReceipt } from '../build/Vault_Vault';
+import { storeBurnReceipt, storeDepositNative } from '../build/Vault_Vault';
 
 const NANO_PER_GAS = 400n;
 const rows: { flow: string; vaultGas: string; atMainnet: string; budget: string; note: string }[] = [];
@@ -67,11 +67,11 @@ describe('gas', () => {
         const gb = await f.gram(f.bob.address);
         const wd = await f.withdraw(f.bob, s);
         expectNoFailures(wd);
-        const got = gramPaidTo(wd, f.bob.address, 1) +
-            gramPayouts(wd, f.bob.address).filter((g) => g.reason === REASON.POSITION_OUT).reduce((a, g) => a + g.amount, 0n);
+        const got = gramPaidTo(wd, f.bob.address, 1);
         const userCost = gb - (await f.gram(f.bob.address)) + got;
         row('Withdraw: burn notification (vault)', computeGas(wd, f.vault.address, 0x7bdd97de)[0], WITHDRAW_GAS);
         row('Withdraw: BurnReceipt (vault, max)', max(computeGas(wd, f.vault.address, OPD.BurnReceipt)), toNano('0.32'), 'accepted after the Position check; op budget');
+        row('Withdraw: USDT arrival -> forwarded to the user (vault, max)', max(computeGas(wd, f.vault.address, 0x7362d09c)), toNano('0.07'), 'accepted; compute part of USER_PAY_GAS (0.16 - 0.08 transfer - fees), held by the op');
         row('Withdraw: max vault tx', maxGas(wd, f.vault.address), toNano('0.32'), `${vaultTxs(wd, f.vault.address).length} vault txs; user net cost ${fmt(userCost)} Gram`);
         expect(userCost).toBeLessThan(toNano('0.7'));
 
@@ -141,5 +141,31 @@ describe('gas', () => {
         const cf = await f.vault.send(f.alice.getSender(), { value: toNano('0.15') }, { $$type: 'CollectFees', queryId: 1n });
         expectNoFailures(cf);
         row('CollectFees (vault)', computeGas(cf, f.vault.address, 0x56410009)[0], toNano('0.15'));
+
+        // Recover (audit M-1): a deposit whose observation is lost, then a user decrease that never
+        // reached its Position (re-sync collect, retry, forward).
+        const dn = beginCell().store(storeDepositNative({ $$type: 'DepositNative', queryId: 1n, amount: GRAM_1, minShares: 0n, receiver: null })).endCell();
+        const d1 = await stepParallel(f.chain, msg(f.carol.address, f.vault.address, GRAM_1 + DEPOSIT_GAS + toNano('0.05'), dn), 1);
+        void d1;
+        await f.wait(DEP_TIMEOUT);
+        const rc1 = await f.recover();
+        expectNoFailures(rc1);
+        row('Recover: stale deposit refunded (vault)', computeGas(rc1, f.vault.address, 0x56410011)[0], toNano('0.5'), 'paid by the caller');
+        const s2 = await f.shares(f.admin.address);
+        const wa = await f.shareWallet(f.admin.address);
+        const burn2 = beginCell().store(storeJettonBurn({ $$type: 'JettonBurn', queryId: 2n, amount: s2 / 4n, responseDestination: null, customPayload: null })).endCell();
+        const w2 = await stepParallel(f.chain, msg(f.admin.address, wa.address, WITHDRAW_GAS + toNano('0.1'), burn2), 0);
+        for (let i = 0; i < 300; i++) {
+            if ([...(await f.vault.getGetOps()).values()].some((o) => o.kind === 4n)) break;
+            if ((await w2.it.next()).done) break;
+        }
+        await f.wait(RECOVERY_DELAY);
+        const rc2 = await f.recover();
+        expectNoFailures(rc2);
+        row('Recover: lost decrease re-synced (vault)', computeGas(rc2, f.vault.address, 0x56410011)[0], toNano('0.5'),
+            `${vaultTxs(rc2, f.vault.address).length} vault txs; max ${maxGas(rc2, f.vault.address)} gas`);
+        row('Recover flow: max vault tx', maxGas(rc2, f.vault.address), toNano('0.32'));
+        const v = await f.data();
+        expect([v.workerActive, v.opCount]).toEqual([false, 0n]);
     }, 300000);
 });

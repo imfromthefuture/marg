@@ -297,7 +297,7 @@ message(0x4d4c0031) RewardClaim {
     queryId: Int as uint64;
     delta: Int as int64;
     owner: Address;
-    acked: Int as coins;
+    acked: Int as int128;           // v4: signed (see RewardState.acked)
     lastAcc: Int as uint256;
     frac: Int as uint64;
     owed: Int as coins;
@@ -310,6 +310,8 @@ message(0x4d4c0032) RewardAck {
     delta: Int as int64;
     claim: Bool;
     frac: Int as uint64;            // claim only: the new sub-nanoGram remainder
+    owed: Int as coins;             // v4, claim only: what is still owed after the payout (0 unless the master
+                                    // could not pay it all, see the master's rent fund)
 }
 
 // Owner -> own wallet
@@ -317,6 +319,8 @@ message(0x4d4c0033) ClaimRewards {
     queryId: Int as uint64;
 }
 
+// Anyone -> a wallet: report the balance again (repairs a master view left stale by a bounced checkpoint
+// or an under-reported receive); the caller pays and the rest of its value comes back.
 message(0x4d4c0034) SyncRewards {
     queryId: Int as uint64;
 }
@@ -339,6 +343,7 @@ message(0x4d4c0022) TaxSplitEvent {
     wallet: Int as coins;
     buyback: Int as coins;
     extra: Int as coins;            // non-tax Gram swept with it (gas leftovers): to buyback, else wallet, else rewards
+    rent: Int as coins;             // v4: taken from the rewards share into the master's rent fund (amount = rewards + rent + wallet + buyback)
 }
 
 message(0x4d4c0023) BuybackEvent {
@@ -353,7 +358,9 @@ message(0x4d4c0024) BurnEvent {
 
 struct RewardState {
     synced: Int as int128;          // balance last reported to the master (sent, not bounced)
-    acked: Int as coins;            // shares the master has applied for this owner (acks received)
+    acked: Int as int128;           // shares the master has applied for this owner (acks received). v4: signed,
+                                    // never clamped (audit R6-1): it mirrors the master's view exactly, which can
+                                    // be negative for a moment; rewards are earned on max(acked, 0).
     lastAcc: Int as uint256;        // master accumulator at the last ack
     frac: Int as uint64;            // sub-nanoGram remainder, scaled by REWARD_SCALE
     owed: Int as coins;             // unclaimed rewards up to lastAcc, nanoGram
@@ -375,6 +382,7 @@ struct RewardsData {
     accrued: Int;                   // Gram handed to holders (in acc or carried)
     claimed: Int;
     carry: Int;                     // accrued while totalShares was 0: added to the next accrual
+    rentFund: Int;                  // v4: Gram set aside for the master's storage rent (part of held())
 }
 
 struct BuybackStatus {

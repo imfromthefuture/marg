@@ -28,7 +28,7 @@ Per buy or sell of a launch token, all in Gram (the Gram side of the swap):
 
 | Fee | Rate | Where it goes |
 |---|---|---|
-| Platform fee | 1% (`Router.platformBps`, default 100 bps; the DEX admin can set 0..1%, applies to the next swap) | **directly to the Router treasury in the same transaction** (`GramPayout` reason 15, value = amount). Buy: 1% of the Gram input; sell: 1% of the Gram output (the seller gets `out − sellTax − fee`). Below 0.01 Gram it is carried in the pool and added to the next payout. The dev buy pays it too. |
+| Platform fee | 1% (`Router.platformBps`, default 100 bps; the DEX admin can set 0..1% on the live v3 Router, 0.85..1% on v4 (`PLATFORM_FEE_MIN_BPS`, audit R8B-2: the fee stays high enough that sandwiching a buyback does not pay); applies to the next swap) | **directly to the Router treasury in the same transaction** (`GramPayout` reason 15, value = amount). Buy: 1% of the Gram input; sell: 1% of the Gram output (the seller gets `out − sellTax − fee`). Below 0.01 Gram it is carried in the pool and added to the next payout. The dev buy pays it too. |
 | LP fee | spacing-10 preset: 0.05% base + variable (≤ 0.49%), + the anti-snipe extra at launch | the locked position (treasury); 10% of it is the DEX protocol share (treasury) |
 | Creator tax (optional) | buy and/or sell, 1%..5% | the token's master, **auto-paid inside the swap** (`GramPayout` reason 14, value = amount + 0.04) as soon as the pool's `taxFees` ≥ 0.1 Gram; the master splits it at once (rewards / tax wallet / buyback, which runs when due). Less than 0.1 Gram stays in the pool until the next qualifying swap, `Harvest` or `CollectTax`. |
 
@@ -94,7 +94,7 @@ the supply.
 | `0x4d4c0012` | `SetTreasury` | admin → Factory | queryId; treasury |
 | `0x4d4c0013` | `TransferAdmin` | admin → Factory | queryId; newAdmin (sending your own address cancels) |
 | `0x4d4c0014` | `ClaimAdmin` | pending admin → Factory | queryId |
-| `0x4d4c0015` | `WithdrawExcess` | admin → Factory | queryId (sweeps balance above 0.05 Gram to the treasury) |
+| `0x4d4c0015` | `WithdrawExcess` | admin → Factory | queryId (sweeps balance above 0.05 Gram to the treasury; this includes the value of a bounced `LaunchSetup` whose creator is no longer among the last 16 pending launches, which the admin then returns by hand, see Admin powers) |
 | `0x4d4c0021` | `TokenLaunched` (event) | Factory → external | queryId; index; master; creator; devBuy; buyTaxBps; sellTaxBps; taxWallet?; rewardsBps; walletBps; buybackBps; antiSnipePips; antiSnipeDuration; vaultBps; vaultLock; vaultVest |
 | `0x4d4c0040` | `VaultSetup` | Master → Vault (once, at launch) | queryId; beneficiary; wallet; total: coins; start, lock, vest: uint32 |
 | `0x4d4c0041` | `ClaimVault` | beneficiary → Vault | queryId (attach ≥ `get_claim_value()` = 0.15 Gram; the rest comes back). Throws when nothing is claimable |
@@ -102,14 +102,16 @@ the supply.
 | `0x4d4c0043` | `VaultClaimed` (event) | Vault → external | queryId; beneficiary; amount; claimed |
 | `0x4d4c0030` | `RewardCheckpoint` | Wallet → Master | queryId; delta: int64; owner |
 | `0x4d4c0031` | `RewardClaim` | Wallet → Master | queryId; delta; owner; acked; lastAcc: uint256; frac: uint64; owed |
-| `0x4d4c0032` | `RewardAck` | Master → Wallet (non-bounceable) | queryId; acc: uint256; delta; claim: Bool; frac |
+| `0x4d4c0032` | `RewardAck` | Master → Wallet (non-bounceable) | queryId; acc: uint256; delta; claim: Bool; frac: uint64 (claim only); owed: coins (v4, claim only: what is still owed after the payout, normally 0) |
 | `0x4d4c0033` | `ClaimRewards` | owner → own Wallet | queryId (attach ≥ `get_reward_values().claim`, priced from the chain's gas price, ~0.01 Gram today; the rest comes back with the rewards) |
-| `0x4d4c0034` | `SyncRewards` | owner → own Wallet | queryId (attach ≥ `get_reward_values().sync`): report the balance again and refresh `owed` |
-| `0x4d4c0035` | `Harvest` | anyone → Master | queryId. Collects the pool's accrued tax (taxed tokens, any split; tax ≥ 0.1 Gram is already auto-paid in the swaps, so this is for the rest). Bucket-paid when due (buyback on, ≥ 1 h since the last harvest, bucket ≥ 0.24): the caller's whole value is refunded. Otherwise caller-paid: attach ≥ `get_harvest_value()` = 0.24 Gram (the rest is refunded), ≥ 60 s since the last harvest. |
+| `0x4d4c0034` | `SyncRewards` | anyone → a Wallet (v4; on v3 the owner only) | queryId (attach ≥ the wallet's `get_reward_values().sync`, which includes its recorded storage debt; the caller pays and the rest of its value comes back as `JettonExcesses`): report the balance again and refresh `owed`. The keeper uses it to repair wallets after a gas-price change (audit R7A-1) |
+| `0x4d4c0035` | `Harvest` | anyone → Master | queryId. Collects the pool's accrued tax (taxed tokens, any split; tax ≥ 0.1 Gram is already auto-paid in the swaps, so this is for the rest). Caller-paid (v4: always): attach ≥ `get_harvest_value()` = 0.24 Gram (the rest is refunded), ≥ 60 s since the last harvest. The Router's `CollectTax` (anyone, `COLLECT_GAS` 0.2 Gram, the unused part comes back: about 0.08 net) does the same job for less; the keeper uses that. |
 | `0x4d4c0036` | `Buyback` | anyone → Master | queryId. Runs a due buyback now (same guards as the automatic run). The caller's whole value is refunded. |
-| `0x4d4c0022` | `TaxSplitEvent` (event) | Master → external | amount; rewards; wallet; buyback; extra |
+| `0x4d4c0022` | `TaxSplitEvent` (event) | Master → external | amount; rewards; wallet; buyback; extra (non-tax Gram swept with it); rent (v4: taken from the rewards share into the rent fund; amount = rewards + rent + wallet + buyback) |
 | `0x4d4c0023` | `BuybackEvent` (event) | Master → external | queryId; amount |
 | `0x4d4c0024` | `BurnEvent` (event) | Master → external | amount; totalSupply |
+
+There is no `ResetRewards` message (v4 dropped the idea, see "Lost messages" under v4 changes).
 
 The jetton uses the standard TEP-74 and TEP-89 opcodes (`0x0f8a7ea5`, `0x178d4519`, `0x7362d09c`,
 `0x595f07bc`, `0x7bdd97de`, `0xd53276db`, `0x2c76b973`, `0xd1735400`).
@@ -132,6 +134,11 @@ they serialize byte-identically to the dex/v2 ones.
 - `SetTreasury` sets the fee claimer and launch-fee receiver for **new** launches. Existing
   position NFTs keep their owner; the treasury can move them with a TEP-62 transfer.
 - Admin transfer takes two steps (`TransferAdmin`, then `ClaimAdmin`).
+- `WithdrawExcess` sends the factory's balance above 0.05 Gram to the treasury. The factory remembers
+  the creator of only the last 16 launches (`FACTORY_PENDING`); if a `LaunchSetup` bounces after 16
+  newer launches (it cannot in practice: the factory checks and funds everything), its whole value stays
+  in the factory and `WithdrawExcess` would send it to the treasury with the rest. The admin then
+  returns it to the creator by hand (the `LaunchBounced` event names the index and value; audit R7B-7).
 - The admin has no power over tokens, pools, positions, taxes, splits, rewards or the buyback after
   a launch. Nobody does: the split and the tax wallet are fixed at launch. The Router address is
   immutable.
@@ -142,7 +149,7 @@ they serialize byte-identically to the dex/v2 ones.
 |---|---|---|
 | Factory | `get_token_address(index)` | master address of launch `index` (0-based; `get_factory_data().nextIndex` = count) |
 | Factory | `get_create_value(devBuy)` | exact value to attach to `CreateToken` without a vault; the excess comes back |
-| Factory | `get_create_value2(devBuy, hasVault)` | the same, with `VAULT_GAS` (0.12 Gram) added when `hasVault` (vaultBps > 0) |
+| Factory | `get_create_value2(devBuy, hasVault)` | the same, with `VAULT_GAS` (0.13 Gram) added when `hasVault` (vaultBps > 0) |
 | Factory | `get_factory_data()` | admin, pendingAdmin, treasury, router, launchFee, params, nextIndex |
 | Factory | `get_start_sqrt_price()` | start `sqrtPriceX96` at the current params (before the floor to the spacing) |
 | Master | `get_jetton_data()`, `get_wallet_address(owner)` | TEP-74 |
@@ -194,7 +201,7 @@ depth shrinks. The two mints sum to exactly 1e18.
 - **Rewards.** The vault's wallet is never tracked (the wallets carry the vault address as an init
   parameter), so locked tokens do not dilute holder rewards. Claimed tokens land in the
   beneficiary's normal (tracked) wallet and earn from then on.
-- **Gas.** `get_create_value2(devBuy, true)` adds `VAULT_GAS` 0.12 Gram: 0.05 stays in the vault and
+- **Gas.** `get_create_value2(devBuy, true)` adds `VAULT_GAS` 0.13 Gram: 0.05 stays in the vault and
   0.03 in its wallet as storage reserves; the rest covers the extra master compute and forward fees.
 
 ## Tax split
@@ -237,7 +244,8 @@ holder's own wallet.
 
 ```
 master: acc += (r * 1e18 + rem) / totalShares     (rem = the remainder, carried to the next accrual)
-        if totalShares = 0: r is carried and added to the next accrual
+        if totalShares < 1% of the supply (v4): r goes to the bucket, else the tax wallet (the factory
+        refuses holders-only splits, audit R10-1, so nothing is carried)
 wallet, on each RewardAck{acc, delta}:
         x     = acked * (acc - lastAcc) + frac
         owed += x / 1e18 ;  frac = x % 1e18
@@ -245,6 +253,13 @@ wallet, on each RewardAck{acc, delta}:
 pending = owed + (acked * (acc_now - lastAcc) + frac) / 1e18
 ```
 
+- **Start threshold (v4, audit R8B-1).** Rewards accrue only once tracked holders together own at
+  least 1% of the supply (`REWARD_MIN_SHARES`; the Router's pool wallet does not count), so one dust
+  holder cannot take the whole share of the first buys. Until then the rewards share goes to the buyback
+  bucket, else to the tax wallet. The factory refuses a holders-only split (holder rewards need a buyback
+  or wallet share, audit R10-1), so no carry builds up; the carry path stays only as a fallback
+  (released a tenth per accrual). A dev buy of at least 1% of the supply (about 30 Gram on the 2,600 tier) reaches it at
+  once. (v3: carried only while `totalShares` is 0.)
 - **Checkpoints.** A tracked wallet sends `RewardCheckpoint{delta = balance - synced}` in the
   same transaction as every balance change: transfer out, transfer in, burn. The master adds
   `delta` to `totalShares` and answers `RewardAck{acc}`. Messages between one pair of contracts
@@ -330,15 +345,13 @@ is not available yet.
 and the buyback run without a keeper while the token trades. `Harvest` collects what is left below
 the threshold (and runs a due buyback) on a quiet token:
 
-- Read `get_buyback_status()`. If `harvestDue` (buyback on, bucket ≥ 0.24 Gram, ≥ 1 h since the
-  last harvest), send `Harvest` with any small value (0.03 Gram); it is refunded and the bucket
-  pays the Router's `CollectTax` gas (0.21 Gram) plus `KEEPER_FEE`. Measured cost to the bucket
-  when there is no tax to collect: 0.05 Gram (cap 0.24).
-- Otherwise, once `now ≥ nextCallerHarvestAt` (60 s after the last harvest of either kind), send
-  `Harvest` with ≥ `get_harvest_value()` (0.24 Gram): the keeper pays the 0.21 Gram `CollectTax`
-  gas and the 0.03 Gram fee, the rest is refunded. This works for "Holders" and "Wallet" splits too
-  (buybackBps = 0). Measured keeper cost: 0.2403 Gram. The Router's leftover follows the tax
-  payout (the split's `extra`) or, with no tax, goes to the bucket (buyback on) or the creator.
+- Once `now ≥ nextCallerHarvestAt` (60 s after the last harvest), send `Harvest` with
+  ≥ `get_harvest_value()` (0.24 Gram): the keeper pays the 0.21 Gram `CollectTax` gas and the 0.03
+  Gram fee, the rest is refunded. It is worth it only when enough tax waits in the pool (the keeper
+  harvests at ≥ 10x its cost). This works for "Holders" and "Wallet" splits too (buybackBps = 0). The
+  Router's leftover goes to the bucket (buyback on), else the tax wallet, else the holders. v4: there
+  is no bucket-paid harvest any more (`harvestDue` is always false): it let anyone spend the bucket
+  hourly with no tax pending.
 - If only `wouldRun`, send `Buyback`.
 - Anyone can also call the Router's `CollectTax` directly with their own gas.
 
@@ -438,8 +451,11 @@ npx jest launch/tests                         # 42 tests (launch.spec 14, tax.sp
   sends its launch excess to the bucket instead of the creator.
 - **Tokens sent to the master.** With forward_ton and buyback on, they are burned (counted in
   `burned`). Without forward_ton they sit in the master's untracked wallet for good.
-- **Bucket drain by keepers.** A due `Harvest` that finds no tax costs the bucket about 0.05 Gram
-  (cap 0.24) at most once per hour. Caller-paid harvests (every 60 s) cost the bucket nothing.
+- **Bucket drain by keepers.** v3 only: a due bucket-paid `Harvest` that finds no tax costs the bucket
+  about 0.05 Gram (cap 0.24) at most once per hour. v4 has no bucket-paid harvest (always caller-paid).
+- **Integrators: long-idle wallets.** A rewards-token wallet idle for more than about 2 years (live v3
+  wallets in particular) may owe more rent than its stored balance shows. Before making it claim, send
+  or sell, top it up with a plain 0.05 Gram transfer in the same transaction, as the app does (audit C8).
 - **Content** is stored as given (TEP-64 cell). The factory does not validate metadata.
 
 ## v3 changes
@@ -461,3 +477,37 @@ their v2 contracts.
 - No buyback runs before the anti-snipe window has ended (`get_buyback_status().nextAllowedAt`).
 - New getter `get_launch_state()` on the master. The fee converter can claim its own holder rewards
   (`ClaimJettonRewards`, 0x4d46000a) and keeps a larger swap margin (`get_convert_value`).
+
+## v4 changes (holder rewards and rent)
+
+v4 keeps the v3 rewards design (per-holder state in each wallet, checkpoint and ack) and hardens it.
+A master-side per-holder ledger was tried and dropped: it let dust entries make a holder's reports run
+out of gas and could fill the master's state (internal audit round 5).
+
+- **Storage debt.** Every tracked send (transfer, burn, claim) keeps 0.01 Gram in the wallet plus any
+  storage debt (`myStorageDue()`), paid from the incoming value; receives do the same. An ack can no
+  longer be eaten by a debt from years of inactivity. Acks also carry a 0.002 Gram cushion.
+- **Gas-price headroom.** Checkpoint and claim values carry 2x the compute they pay for (the master
+  requires 1x and returns the rest with the ack), so a gas-price rise of up to ~3x while one is in
+  flight is absorbed. A tracked transfer still fits in the standard 0.05 Gram.
+- **Re-sync.** `SyncRewards`, from anyone (the caller pays), reports the wallet's balance again; the
+  rest of the caller's value comes back and the wallet keeps its own Gram. A keeper uses it to repair
+  wallets after a large gas-price change. Shares are signed (`acked` is never clamped), so a
+  bounced checkpoint followed by a re-sync always ends at the wallet's real balance.
+- **Transfers never destroy tokens.** A receive whose value cannot pay the notification bounces the
+  whole transfer back to the sender, whose wallet returns the transfer's Gram to its owner.
+- **Claims** are capped by what is left of the accrued rewards; anything not paid stays owed.
+- **Long-idle wallets.** `get_transfer_fee` and `get_reward_values` include the storage debt already
+  recorded, but not the rent of an idle period that no transaction has charged yet. On a wallet idle
+  for years, a call with exactly those values is refused and bounces (nothing moves); top the wallet
+  up first (a plain 0.05 Gram transfer, as the app does) or attach a margin.
+- **Lost messages.** A checkpoint ack carries the checkpoint's leftover and a claim ack 4x its compute,
+  so both survive a gas-price rise of ~15x while in flight. A wallet whose ack is nevertheless lost
+  stays unable to claim (its `inFlight` never returns to 0); nothing is paid twice and other holders
+  are not affected. There is deliberately no reset: without per-holder state in the master a reset
+  could not know what the master applied, and an internal audit showed it could pay a holder twice.
+- **Master rent fund.** Each tax payout first tops `rentFund` up to 0.25 Gram from the rewards share
+  (`TaxSplitEvent.rent`; about 10 years of a master's rent); a plain Gram transfer to the master tops it
+  up too (the rest goes to the creator). Rent is taken from it, never from
+  holders' rewards, the buyback bucket or the launch-fee escrow while it lasts. A claim never takes
+  the master below its storage minimum; what cannot be paid stays owed (`RewardAck.owed`).

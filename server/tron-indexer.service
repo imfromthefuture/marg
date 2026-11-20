@@ -8,11 +8,12 @@ Group=tron-indexer
 WorkingDirectory=/opt/tron-indexer
 Environment=PORT=8811
 Environment=NETWORK=mainnet
-Environment=LAUNCH_FACTORY=EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1
-Environment=DEX_ROUTER=EQB5dkciMSABWKovdVBUs69piI2fBjyn5oqw46wbyRPe5A0H
+Environment=LAUNCH_FACTORY=EQD3iwBtAWuoH6Xkr2Bi54pVRB-V6hGdkFD8PGbJWl4sH4O1,EQChP_pRE50KqE3QvRHwogpoCuIrp1To5sBckCIwNS1J27Ja
+Environment=DEX_ROUTER=EQBB5XdesZT29M6jlLKfZTOcZEw5Kqez6ntOedoRsbaKp0vZ
 Environment=DEX_PLAIN_CHECK_SEC=60
 Environment=DB_PATH=/var/lib/tron-indexer/marg.db
-# Optional: TONCENTER_API_KEY in this file raises the rate limit from 1 to ~10 requests/s.
+# TONCENTER_API_KEY in this file raises the rate limit from 1 to ~10 requests/s. Use the indexer's OWN key,
+# not the one nginx adds for the web /toncenter proxy (audit R2-M4: the browser traffic must not eat its limit).
 EnvironmentFile=-/etc/tron-indexer.env
 ExecStart=/usr/bin/node /opt/tron-indexer/dist/indexer.js
 Restart=always
